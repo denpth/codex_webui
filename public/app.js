@@ -1,4 +1,5 @@
 'use strict';
+import { terminalEdit } from './mobile-edit.js';
 import { isRetryScreen } from './terminal-refresh.js';
 const $ = id => document.getElementById(id);
 const state = { sessions: [], terminals: [], cursor: null, selected: null, activeTerminal: null,
@@ -6,6 +7,10 @@ const state = { sessions: [], terminals: [], cursor: null, selected: null, activ
 let term, fit, reconnectTimer, searchTimer;
 let viewportSize = { cols: 80, rows: 24 };
 let paneSize = null;
+let sentInput = '', composingInput = false, liveInputActive = false;
+const inputDrafts = new Map();
+let displayChoice = localStorage.getItem('terminalDisplay') || 'auto';
+let wrappedDisplay = displayChoice === 'wrap' || (displayChoice === 'auto' && matchMedia('(max-width:640px)').matches);
 let waitingForOtherApp = false, terminalUpdatedAt = 0;
 
 async function api(url, { method = 'GET', body } = {}) {
@@ -161,12 +166,81 @@ function fitTerminal() {
     fit.fit();
     viewportSize = { cols: term.cols, rows: term.rows };
     socketSend({ type: 'resize', ...viewportSize });
-    updateViewportControls();
+    updateViewportControls(); updateWrappedScrollbar();
   } catch {}
 }
 function updateViewportControls() {
-  $('terminalViewport').hidden = !paneSize || $('terminalHost').hidden ||
+  $('terminalViewport').hidden = wrappedDisplay || !paneSize || $('terminalHost').hidden ||
     (viewportSize.cols >= paneSize.cols && viewportSize.rows >= paneSize.rows);
+}
+function updateDisplay() {
+  wrappedDisplay = displayChoice === 'wrap' || (displayChoice === 'auto' && matchMedia('(max-width:640px)').matches);
+  $('terminalHost').classList.toggle('wrapped', wrappedDisplay);
+  $('terminalWrapped').hidden = !wrappedDisplay;
+  $('terminalScrollbar').hidden = !wrappedDisplay;
+  $('terminalMount').inert = wrappedDisplay;
+  $('terminalMount').setAttribute('aria-hidden', String(wrappedDisplay));
+  $('wrapTerminal').setAttribute('aria-pressed', String(wrappedDisplay));
+  $('gridTerminal').setAttribute('aria-pressed', String(!wrappedDisplay));
+  $('typingHint').textContent = wrappedDisplay || liveInputActive ? 'Typing is shared live' : 'Type directly in the terminal';
+  $('terminalInput').placeholder = wrappedDisplay || liveInputActive ? 'Type here — shared live with your terminal…' : 'Type or paste a message for Codex…';
+  $('terminalInput').maxLength = wrappedDisplay || liveInputActive ? 8192 : 32768;
+  socketSend({ type: 'display', wrapped: wrappedDisplay });
+  updateViewportControls(); updateWrappedScrollbar();
+}
+$('wrapTerminal').onclick = () => { displayChoice = 'wrap'; localStorage.setItem('terminalDisplay', displayChoice); updateDisplay(); fitTerminal(); };
+$('gridTerminal').onclick = () => { displayChoice = 'grid'; localStorage.setItem('terminalDisplay', displayChoice); updateDisplay(); fitTerminal(); };
+$('terminalWrapped').onclick = () => {
+  if (state.terminalReady && !window.getSelection()?.toString()) $('terminalInput').focus();
+};
+function renderSnapshot(text) {
+  const output = $('terminalWrapped');
+  if (output.textContent === text) return;
+  const follow = output.scrollTop + output.clientHeight >= output.scrollHeight - 30;
+  const top = output.scrollTop;
+  output.textContent = text;
+  output.scrollTop = follow ? output.scrollHeight : top;
+  updateWrappedScrollbar();
+}
+function updateWrappedScrollbar() {
+  if (!wrappedDisplay || $('terminalHost').hidden) return;
+  const output = $('terminalWrapped'), rail = $('terminalScrollbar'), thumb = $('terminalScrollThumb');
+  const height = rail.clientHeight, max = Math.max(0, output.scrollHeight - output.clientHeight);
+  const thumbHeight = max ? Math.max(30, height * output.clientHeight / output.scrollHeight) : height;
+  thumb.style.height = `${Math.min(height, thumbHeight)}px`;
+  thumb.style.top = `${max ? output.scrollTop / max * (height - thumbHeight) : 0}px`;
+  rail.setAttribute('aria-valuemax', String(Math.round(max)));
+  rail.setAttribute('aria-valuenow', String(Math.round(output.scrollTop)));
+  rail.setAttribute('aria-disabled', String(!max));
+}
+$('terminalWrapped').onscroll = updateWrappedScrollbar;
+let scrollGrab = 0;
+function dragScrollbar(event) {
+  const rail = $('terminalScrollbar'), thumb = $('terminalScrollThumb'), output = $('terminalWrapped');
+  const travel = rail.clientHeight - thumb.clientHeight;
+  if (travel > 0) output.scrollTop = Math.max(0, Math.min(1, (event.clientY - rail.getBoundingClientRect().top - scrollGrab) / travel)) * (output.scrollHeight - output.clientHeight);
+}
+$('terminalScrollbar').onpointerdown = event => {
+  event.preventDefault();
+  const thumb = $('terminalScrollThumb');
+  scrollGrab = event.target === thumb ? event.clientY - thumb.getBoundingClientRect().top : thumb.clientHeight / 2;
+  $('terminalScrollbar').setPointerCapture(event.pointerId); dragScrollbar(event);
+};
+$('terminalScrollbar').onpointermove = event => { if ($('terminalScrollbar').hasPointerCapture(event.pointerId)) dragScrollbar(event); };
+$('terminalScrollbar').onpointerup = event => { if ($('terminalScrollbar').hasPointerCapture(event.pointerId)) $('terminalScrollbar').releasePointerCapture(event.pointerId); };
+$('terminalScrollbar').onkeydown = event => {
+  const output = $('terminalWrapped');
+  const amount = { ArrowUp: -40, ArrowDown: 40, PageUp: -output.clientHeight, PageDown: output.clientHeight }[event.key];
+  if (amount !== undefined) { event.preventDefault(); output.scrollTop += amount; }
+  if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); output.scrollTop = event.key === 'Home' ? 0 : output.scrollHeight; }
+};
+function flushLiveInput() {
+  if (composingInput || !state.terminalReady) return false;
+  const value = $('terminalInput').value;
+  const data = terminalEdit(sentInput, value);
+  if (data && !sendTerminal(data)) return false;
+  sentInput = value; liveInputActive = true;
+  return true;
 }
 document.querySelectorAll('[data-pan]').forEach(button => {
   button.onpointerdown = event => event.preventDefault();
@@ -208,20 +282,26 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
   state.socket?.close(); state.socket = null;
   terminalStatus('Connecting…'); clearError();
   $('terminalWelcome').hidden = true; $('terminalHost').hidden = false;
-  $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = false;
+  $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalDisplay').hidden = false;
   $('reconnectButton').hidden = true;
   initTerminal(); fitTerminal();
   let opened;
-  try { opened = await post('/terminal/connect', { clientVersion: 'tmux-terminal-5', terminalId, sessionId: session?.id, cols: viewportSize.cols, rows: viewportSize.rows }); }
+  try { opened = await post('/terminal/connect', { clientVersion: 'tmux-terminal-6', terminalId, sessionId: session?.id, cols: viewportSize.cols, rows: viewportSize.rows }); }
   catch (error) {
     if (generation === state.generation) {
       terminalStatus('Unable to connect');
       $('terminalWelcome').hidden = false; $('terminalHost').hidden = true;
-      $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = true;
+      $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = $('terminalDisplay').hidden = true;
     }
     throw error;
   }
   if (generation !== state.generation) return;
+  if (opened.id !== state.activeTerminal) {
+    if (state.activeTerminal) inputDrafts.set(state.activeTerminal, { value: $('terminalInput').value, sent: sentInput, live: liveInputActive });
+    const draft = inputDrafts.get(opened.id);
+    $('terminalInput').value = draft?.value || ''; sentInput = draft?.sent || ''; liveInputActive = draft?.live || false; composingInput = false;
+    autoSize($('terminalInput')); $('terminalWrapped').textContent = '';
+  }
   state.activeTerminal = opened.id; state.terminalSessionId = opened.sessionId;
   state.selected = session || state.sessions.find(s => s.id === opened.sessionId) || null;
   sessionStorage.setItem('webuiTerminal', opened.id);
@@ -230,10 +310,11 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
   paneSize = { cols: opened.paneCols, rows: opened.paneRows }; updateViewportControls();
   const url = new URL('/terminal/ws', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('ticket', opened.ticket);
   const socket = new WebSocket(url); state.socket = socket;
-  socket.onopen = () => { if (generation === state.generation) { socketSend({ type: 'resize', cols: viewportSize.cols, rows: viewportSize.rows }); } };
+  socket.onopen = () => { if (generation === state.generation) { socketSend({ type: 'resize', cols: viewportSize.cols, rows: viewportSize.rows }); updateDisplay(); } };
   socket.onmessage = event => {
     if (generation !== state.generation) return;
     const message = JSON.parse(event.data);
+    if (message.type === 'snapshot') renderSnapshot(message.text);
     if (message.type === 'output') term.write(message.data, updateWaitingTerminal);
     if (message.type === 'ready') { terminalStatus(message.exited ? 'Process ended' : 'Connected', !message.exited); if (message.exited) $('reconnectButton').hidden = false; }
     if (message.type === 'exit') { terminalStatus(`Process ended (${message.exitCode})`); term.writeln('\r\n[Terminal ended. Select a saved conversation or start a new one.]'); loadSessions(); loadTerminals(); }
@@ -245,7 +326,7 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
     reconnectTimer = setTimeout(() => connectTerminal({ terminalId: opened.id, reconnect: true }).catch(error => { terminalStatus('Disconnected'); report(error); }), reconnect ? 3000 : 1000);
   };
   socket.onerror = () => { if (generation === state.generation) terminalStatus('Connection interrupted'); };
-  loadTerminals();
+  updateDisplay(); loadTerminals();
   if (!reconnect && !matchMedia('(max-width:640px)').matches) term.focus();
 }
 $('reconnectButton').onclick = () => connectTerminal({ terminalId: state.activeTerminal, reconnect: true }).catch(report);
@@ -253,23 +334,51 @@ $('terminalComposer').onsubmit = event => {
   event.preventDefault(); const value = $('terminalInput').value;
   if (!value.trim()) return;
   if (!state.terminalReady) return report('The terminal is disconnected. Reconnect before sending.');
-  // Bracketed paste protects multiline text from accidentally executing line by line.
+  if (composingInput) return;
   const socket = state.socket;
+  if (wrappedDisplay || liveInputActive) {
+    if (!flushLiveInput()) return;
+    // The field has already sent the prompt; only submit it, never paste it twice.
+    setTimeout(() => { if (state.socket === socket) sendTerminal('\r'); }, 180);
+    sentInput = ''; liveInputActive = false;
+    $('terminalInput').value = ''; autoSize($('terminalInput')); updateDisplay();
+    if (!state.selected) setTerminalTitle(value);
+    return;
+  }
+  // Bracketed paste protects multiline text from executing line by line.
   if (sendTerminal('\x1b[200~' + value + '\x1b[201~')) {
     setTimeout(() => { if (state.socket === socket) sendTerminal('\r'); }, 180);
     if (!state.selected) setTerminalTitle(value);
     $('terminalInput').value = ''; autoSize($('terminalInput'));
   }
 };
+let shiftedKey = false;
+$('shiftKey').onpointerdown = event => event.preventDefault();
+$('shiftKey').onclick = () => { shiftedKey = !shiftedKey; $('shiftKey').setAttribute('aria-pressed', String(shiftedKey)); };
 const keys = { escape: '\x1b', tab: '\t', up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C', interrupt: '\x03', enter: '\r' };
 document.querySelectorAll('[data-key]').forEach(button => {
   button.onpointerdown = event => event.preventDefault();
-  button.onclick = () => sendTerminal(keys[button.dataset.key]);
+  button.onclick = () => {
+    const key = button.dataset.key, shifted = shiftedKey;
+    if ((wrappedDisplay || liveInputActive) && !flushLiveInput()) return;
+    if (shifted && ['tab', 'enter', 'up', 'down', 'left', 'right'].includes(key)) socketSend({ type: 'key', key });
+    else sendTerminal(keys[key]);
+    shiftedKey = false; $('shiftKey').setAttribute('aria-pressed', 'false');
+    if ((key === 'enter' || key === 'interrupt') && (wrappedDisplay || liveInputActive)) {
+      if (shifted && key === 'enter') {
+        $('terminalInput').value += '\n'; sentInput = $('terminalInput').value;
+      } else {
+        $('terminalInput').value = ''; sentInput = ''; liveInputActive = false;
+      }
+      autoSize($('terminalInput')); updateDisplay();
+    }
+  };
 });
 async function nativeCommand(command) {
   if (!state.terminalReady) throw new Error('Start or reconnect a terminal first.');
   const socket = state.socket;
   sendTerminal('\x15' + command);
+  if (wrappedDisplay || liveInputActive) { $('terminalInput').value = ''; sentInput = ''; liveInputActive = false; autoSize($('terminalInput')); updateDisplay(); }
   // Codex treats an immediate Enter in a burst as pasted text. Submit after its
   // paste-detection window, and never send the keystroke to a different session.
   await new Promise(resolve => setTimeout(resolve, 180));
@@ -287,12 +396,20 @@ $('confirmClose').onclick = async () => {
     await post('/terminal/close', { terminalId: state.activeTerminal });
     state.activeTerminal = null; state.terminalReady = false; sessionStorage.removeItem('webuiTerminal');
     $('terminalWelcome').hidden = false; $('terminalHost').hidden = true;
-    $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = true;
+    $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = $('terminalDisplay').hidden = true;
     $('confirmDialog').close(); updateControls(); await loadTerminals(); loadSessions();
   } catch (error) { report(error); }
 };
 function autoSize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 130) + 'px'; }
-$('terminalInput').oninput = () => autoSize($('terminalInput'));
+$('terminalInput').addEventListener('compositionstart', () => { composingInput = true; });
+$('terminalInput').addEventListener('compositionend', () => {
+  composingInput = false;
+  if (wrappedDisplay || liveInputActive) flushLiveInput();
+});
+$('terminalInput').oninput = () => {
+  autoSize($('terminalInput'));
+  if (wrappedDisplay || liveInputActive) flushLiveInput();
+};
 $('terminalInput').onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !matchMedia('(pointer:coarse)').matches) {
     event.preventDefault(); $('terminalComposer').requestSubmit();
@@ -312,14 +429,14 @@ $('settingsForm').onsubmit = event => {
   localStorage.setItem('terminalTextSize', $('textSize').value);
   fitTerminal(); $('settingsDialog').close();
 };
-function updateViewport() { document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`); syncSidebarAccessibility(); fitTerminal(); }
+function updateViewport() { document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`); syncSidebarAccessibility(); updateDisplay(); fitTerminal(); }
 window.visualViewport?.addEventListener('resize', updateViewport); window.addEventListener('resize', updateViewport); updateViewport();
 updateControls(); loadSessions(); loadTerminals();
 const previousTerminal = sessionStorage.getItem('webuiTerminal');
 if (previousTerminal) connectTerminal({ terminalId: previousTerminal, reconnect: true }).catch(error => {
   sessionStorage.removeItem('webuiTerminal'); state.activeTerminal = null; state.terminalReady = false;
   $('terminalWelcome').hidden = false; $('terminalHost').hidden = true;
-  $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = true; updateControls();
+  $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = $('terminalDisplay').hidden = true; updateControls();
 });
 function refreshExternalChanges() { if (!document.hidden) { loadSessions(); loadTerminals(); } }
 setInterval(refreshExternalChanges, 3000);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -105,6 +105,21 @@ export class TmuxSessions {
       .map(line => line.split('\t')).find(([clientPid]) => Number(clientPid) === pid)?.[1];
     if (!client) throw new Error('The terminal is still attaching. Retry shortly.');
     this.run(['refresh-client', '-t', client, flags[direction], ...(direction === 'follow' ? [] : ['10'])]);
+  }
+
+  key(session, key) {
+    const keys = { tab: '\x1b[Z', enter: '\x1b[13;2u', up: '\x1b[1;2A', down: '\x1b[1;2B', left: '\x1b[1;2D', right: '\x1b[1;2C' };
+    if (!keys[key]) throw new Error('Unknown shifted terminal key.');
+    // Literal sequences retain Shift even when the pane has not negotiated extended keys.
+    this.run(['send-keys', '-l', '-t', session.name, '--', keys[key]]);
+  }
+
+  capture(session) {
+    return new Promise((resolve, reject) => {
+      execFile(this.tmuxCommand, [...this.args, '-N', 'capture-pane', '-p', '-J', '-S', '-500', '-t', session.name],
+        { encoding: 'utf8', env: { ...this.env, TMUX: '' }, timeout: 5000, maxBuffer: 4 * 1024 * 1024 },
+        (error, text) => error ? reject(error) : resolve(text.trimEnd()));
+    });
   }
 
   close(session) { this.run(['kill-session', '-t', session.name]); }

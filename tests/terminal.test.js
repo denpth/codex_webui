@@ -97,7 +97,7 @@ test('real tmux shares live typing, keeps pane size fixed and survives WebUI res
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webui-tmux-test-'));
   const root = fileURLToPath(new URL('..', import.meta.url));
   const sessions = new TmuxSessions({ cwd: dir, command: path.join(root, 'tests/fake-terminal.mjs'),
-    env: { ...process.env, CODEX_HOME: dir }, socketName: `webui-test-${path.basename(dir)}`, stateDir: dir, maxTerminals: 1 });
+    env: { ...process.env, CODEX_HOME: dir, WEBUI_TEST_INPUT_LOG: path.join(dir, 'input.log') }, socketName: `webui-test-${path.basename(dir)}`, stateDir: dir, maxTerminals: 1 });
   const server = http.createServer(); const origin = await listen(server); const sockets = [];
   let terminals = new TerminalServer(server, { command: 'unused', cwd: dir, sessions });
   let secondServer;
@@ -145,6 +145,14 @@ test('real tmux shares live typing, keeps pane size fixed and survives WebUI res
   assert.ok(sessions.run(['list-clients', '-F', '#{client_width}x#{client_height}']).includes('120x35'));
   assert.ok(!sessions.run(['capture-pane', '-p', '-t', name]).includes('UNEXPECTED_PANE_RESIZE'));
   assert.equal(pane(), originalPane, 'phone resize leaves pane dimensions unchanged');
+  phone.ws.send(JSON.stringify({ type: 'display', wrapped: true }));
+  await until(() => phone.messages.some(m => m.type === 'snapshot' && m.text.includes('PHONE_LIVE')));
+  assert.equal(pane(), originalPane, 'wrapped snapshots never resize Codex');
+  sessions.key(sessions.list()[0], 'tab');
+  await until(() => fs.readFileSync(path.join(dir, 'input.log'), 'utf8').includes('1b5b5a'));
+  sessions.key(sessions.list()[0], 'enter');
+  await until(() => fs.readFileSync(path.join(dir, 'input.log'), 'utf8').includes('1b5b31333b3275'));
+  await pause(200);
   const beforeDetach = desktop.messages.length;
   phone.ws.close(); await once(phone.ws, 'close'); await pause(150);
   assert.equal(pane(), originalPane); assert.equal(desktop.messages.slice(beforeDetach).map(m => (m.data || '').replace(/\x1b\[\?(?:12|25)[hl]/g, '')).join(''), '', 'phone detach does not repaint desktop');

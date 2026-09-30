@@ -484,7 +484,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: true }));
       }
-      if (body.clientVersion !== 'tmux-terminal-5') {
+      if (body.clientVersion !== 'tmux-terminal-6') {
         throw Object.assign(new Error('This page is out of date. Reload the WebUI to reconnect.'), { status: 426 });
       }
       let session;

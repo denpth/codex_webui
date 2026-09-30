@@ -16,6 +16,7 @@ export class TerminalServer {
     env = process.env, sessions = new TmuxSessions({ command, cwd, maxTerminals, env }) }) {
     Object.assign(this, { cwd, spawn, env, sessions, maxClients });
     this.clients = new Map();
+    this.captures = new Map();
     this.tickets = new Map();
     this.disposed = false;
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
@@ -46,6 +47,12 @@ export class TerminalServer {
       }
     }, 30000);
     this.cleanup.unref();
+    // Cropped tmux clients may not emit output for changes outside their viewport.
+    this.snapshotPoll = setInterval(() => {
+      const active = new Map([...this.clients.values()].filter(c => c.wrapped).map(c => [c.terminal.id, c.terminal]));
+      for (const terminal of active.values()) this.scheduleCapture(terminal);
+    }, 500);
+    this.snapshotPoll.unref();
   }
 
   list() {
@@ -74,10 +81,42 @@ export class TerminalServer {
 
   send(ws, payload) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload)); }
 
+  scheduleCapture(terminal) {
+    if (this.disposed || ![...this.clients.values()].some(client => client.terminal.id === terminal.id && client.wrapped)) return;
+    let capture = this.captures.get(terminal.id);
+    if (!capture) { capture = { timer: null, running: false, dirty: false }; this.captures.set(terminal.id, capture); }
+    capture.dirty = true;
+    if (capture.timer || capture.running) return;
+    capture.timer = setTimeout(async () => {
+      capture.timer = null; capture.running = true; capture.dirty = false;
+      try {
+        const text = await this.sessions.capture(terminal);
+        if (!this.disposed) for (const [ws, client] of this.clients) {
+          if (client.wrapped && client.terminal.id === terminal.id) {
+            if (ws.bufferedAmount > 4 * 1024 * 1024) ws.close(1013, 'Reconnect to catch up');
+            else if (client.lastSnapshot !== text) { this.send(ws, { type: 'snapshot', text }); client.lastSnapshot = text; }
+          }
+        }
+      } catch (error) {
+        if (!this.disposed) for (const [ws, client] of this.clients) {
+          if (client.wrapped && client.terminal.id === terminal.id) this.send(ws, { type: 'error', text: 'Unable to update the wrapped terminal view. Reconnect or use Grid view.' });
+        }
+      } finally {
+        capture.running = false;
+        if (capture.dirty && !this.disposed) this.scheduleCapture(terminal);
+      }
+    }, 120);
+    capture.timer.unref();
+  }
+
   detach(ws) {
     const client = this.clients.get(ws);
     if (!client) return;
     this.clients.delete(ws);
+    if (![...this.clients.values()].some(other => other.terminal.id === client.terminal.id)) {
+      const capture = this.captures.get(client.terminal.id);
+      clearTimeout(capture?.timer); this.captures.delete(client.terminal.id);
+    }
     // Only this browser's tmux client dies. The detached Codex pane stays alive.
     try { client.proc.kill(); } catch { /* Client already exited. */ }
   }
@@ -101,6 +140,7 @@ export class TerminalServer {
     proc.onData(data => {
       if (ws.bufferedAmount > 4 * 1024 * 1024) { ws.close(1013, 'Reconnect to catch up'); return; }
       this.send(ws, { type: 'output', data });
+      this.scheduleCapture(terminal);
     });
     proc.onExit(({ exitCode }) => {
       if (!this.clients.has(ws)) return;
@@ -111,10 +151,16 @@ export class TerminalServer {
     ws.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());
-        if (message.type === 'resize') {
+        if (message.type === 'display') {
+          if (!client.wrapped && message.wrapped === true) client.lastSnapshot = undefined;
+          client.wrapped = message.wrapped === true;
+          if (client.wrapped) this.scheduleCapture(terminal);
+        } else if (message.type === 'resize') {
           proc.resize(dimension(message.cols, 20, 400), dimension(message.rows, 5, 200));
         } else if (message.type === 'viewport' && typeof message.direction === 'string') {
           this.sessions.pan(proc.pid, message.direction);
+        } else if (!client.exited && message.type === 'key' && typeof message.key === 'string') {
+          this.sessions.key(terminal, message.key);
         } else if (!client.exited && message.type === 'input' && typeof message.data === 'string' && message.data.length <= 32768) {
           proc.write(message.data);
         } else if (!client.exited && message.type === 'title' && typeof message.title === 'string') {
@@ -136,7 +182,9 @@ export class TerminalServer {
   }
 
   dispose() {
-    this.disposed = true; clearInterval(this.cleanup); this.tickets.clear();
+    this.disposed = true; clearInterval(this.cleanup); clearInterval(this.snapshotPoll); this.tickets.clear();
+    for (const capture of this.captures.values()) clearTimeout(capture.timer);
+    this.captures.clear();
     for (const ws of this.clients.keys()) { this.detach(ws); ws.close(1001, 'WebUI restarting'); }
     this.wss.close();
   }

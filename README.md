@@ -95,18 +95,25 @@ directly into the terminal or use the message field below it.
 - Each live conversation runs one Codex process in a persistent tmux session.
   Each browser attaches through its own tmux client with its own screen size.
   Typing directly in either terminal appears live on the other connected devices.
-  Drafts in the message field remain local until sent.
+  In **Wrap** mode, typing in the stable message field is shared live; **Send**
+  submits it. Mobile keyboard composition and autocorrect preserve the field.
+  In **Grid** mode, message drafts stay local until sent.
 - The shared pane keeps the size it had when first opened. Connecting,
   disconnecting, rotating, or resizing another device does not resize Codex.
-  Smaller screens follow the cursor automatically; use **View** arrows to pan
-  your own view, then **Follow cursor** to resume automatic tracking.
+  Phones default to **Wrap**, which displays full logical lines at the device
+  width with a visible scrollbar and 500 recent history lines. **Grid** retains
+  the native terminal rendering; use **View** arrows to pan your own view, then
+  **Follow cursor** to resume automatic tracking.
+- Tap **Shift ⇧**, then **Tab**, **Enter**, or an arrow for that shifted binding.
+  Shift resets after the next key.
 - Browser disconnects and WebUI restarts detach clients while leaving Codex
   running. **Open terminals** recovers those sessions after restart. Explicitly
   closing a terminal stops Codex and disconnects every viewer of that terminal.
 - Memory is bounded by eight sessions (including ended sessions until closed),
   32 browser clients, 10,000 history lines per pane, and 4 MiB of queued output
   per slow connection. Disconnected clients are released; no shared output replay
-  buffer is retained in the WebUI server.
+  buffer is retained in the WebUI server. Wrapped snapshots are bounded and
+  shared per pane; unchanged snapshots are not retransmitted.
 The browser uses the native terminal for conversations. The legacy chat HTTP API
 remains available, but Codex permits only one active writer per conversation; close
 its native terminal before resuming the same thread through that API.
