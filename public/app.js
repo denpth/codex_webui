@@ -135,13 +135,13 @@ function initTerminal() {
     fontFamily: 'Menlo, Monaco, "Cascadia Code", Consolas, monospace', lineHeight: 1.2,
     scrollback: 10000, convertEol: false, screenReaderMode: true,
     theme: { background: '#101214', foreground: '#e7ecef', cursor: '#9ee7cb', selectionBackground: '#425b51', black: '#171a1d', green: '#9ee7cb', brightGreen: '#b9f4dc' } });
-  fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open($('terminalHost'));
+  fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open($('terminalMount'));
   term.onData(data => sendTerminal(data));
   term.onTitleChange(title => {
     if (!state.selected && !state.terminalSessionId && title && !/^codex$/i.test(title)) setTerminalTitle(title.split(' | ')[0]);
   });
   term.onResize(({ cols, rows }) => socketSend({ type: 'resize', cols, rows }));
-  new ResizeObserver(fitTerminal).observe($('terminalHost'));
+  new ResizeObserver(fitTerminal).observe($('terminalMount'));
 }
 function setTerminalTitle(value) {
   const title = value.replace(/\s+/g, ' ').trim().slice(0, 100);
