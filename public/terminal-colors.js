@@ -56,3 +56,32 @@ export function renderAnsi(output, text) {
   }
   output.replaceChildren(fragment);
 }
+
+// Codex often emits monochrome emphasis. Give those styles shell colors while
+// retaining explicit ANSI foregrounds. Keep state across websocket chunks.
+export class CodexColors {
+  constructor() { this.pending = ''; this.bold = false; this.dim = false; this.foreground = false; }
+  write(chunk) {
+    let text = this.pending + chunk; this.pending = '';
+    const partial = text.match(/\x1b(?:\[[0-9;:]*)?$/);
+    if (partial) { this.pending = partial[0]; text = text.slice(0, -partial[0].length); }
+    return text.replace(/\x1b\[([0-9;:]*)m/g, (sequence, values) => {
+      const codes = (values || '0').split(/[;:]/).map(Number);
+      for (let i = 0; i < codes.length; i++) {
+        const c = codes[i];
+        if (c === 0) { this.bold = this.dim = this.foreground = false; }
+        else if (c === 1) this.bold = true;
+        else if (c === 2) this.dim = true;
+        else if (c === 22) this.bold = this.dim = false;
+        else if (c === 39) this.foreground = false;
+        else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) this.foreground = true;
+        else if (c === 38 || c === 48) {
+          if (c === 38) this.foreground = true;
+          const mode = codes[++i]; i += mode === 2 ? 3 : mode === 5 ? 1 : 0;
+        }
+      }
+      if (this.foreground) return sequence;
+      return sequence + (this.bold ? '\x1b[32m' : this.dim ? '\x1b[34m' : '\x1b[39m');
+    });
+  }
+}

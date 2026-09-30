@@ -1,11 +1,12 @@
 'use strict';
-import { renderAnsi, terminalTheme } from './terminal-colors.js';
+import { renderAnsi, terminalTheme, CodexColors } from './terminal-colors.js';
 import { terminalEdit } from './mobile-edit.js';
 import { isRetryScreen } from './terminal-refresh.js';
 const $ = id => document.getElementById(id);
 const state = { sessions: [], terminals: [], cursor: null, selected: null, activeTerminal: null,
   terminalSessionId: null, socket: null, generation: 0, terminalReady: false, sessionRequest: 0 };
 let term, fit, reconnectTimer, searchTimer;
+let codexColors = new CodexColors();
 let viewportSize = { cols: 80, rows: 24 };
 let paneSize = null;
 let sentInput = '', composingInput = false, liveInputActive = false;
@@ -200,7 +201,7 @@ function renderSnapshot(text) {
   output.dataset.snapshot = text;
   const follow = output.scrollTop + output.clientHeight >= output.scrollHeight - 30;
   const top = output.scrollTop;
-  renderAnsi(output, text);
+  renderAnsi(output, new CodexColors().write(text));
   output.scrollTop = follow ? output.scrollHeight : top;
   updateWrappedScrollbar();
 }
@@ -302,7 +303,7 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
     if (state.activeTerminal) inputDrafts.set(state.activeTerminal, { value: $('terminalInput').value, sent: sentInput, live: liveInputActive });
     const draft = inputDrafts.get(opened.id);
     $('terminalInput').value = draft?.value || ''; sentInput = draft?.sent || ''; liveInputActive = draft?.live || false; composingInput = false;
-    autoSize($('terminalInput')); $('terminalWrapped').textContent = ''; delete $('terminalWrapped').dataset.snapshot;
+    autoSize($('terminalInput')); codexColors = new CodexColors(); $('terminalWrapped').textContent = ''; delete $('terminalWrapped').dataset.snapshot;
   }
   state.activeTerminal = opened.id; state.terminalSessionId = opened.sessionId;
   state.selected = session || state.sessions.find(s => s.id === opened.sessionId) || null;
@@ -317,7 +318,7 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
     if (generation !== state.generation) return;
     const message = JSON.parse(event.data);
     if (message.type === 'snapshot') renderSnapshot(message.text);
-    if (message.type === 'output') term.write(message.data, updateWaitingTerminal);
+    if (message.type === 'output') term.write(codexColors.write(message.data), updateWaitingTerminal);
     if (message.type === 'ready') { terminalStatus(message.exited ? 'Process ended' : 'Connected', !message.exited); if (message.exited) $('reconnectButton').hidden = false; }
     if (message.type === 'exit') { terminalStatus(`Process ended (${message.exitCode})`); term.writeln('\r\n[Terminal ended. Select a saved conversation or start a new one.]'); loadSessions(); loadTerminals(); }
     if (message.type === 'error') report(message.text);

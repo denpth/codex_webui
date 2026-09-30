@@ -102,7 +102,8 @@ directly into the terminal or use the message field below it.
   disconnecting, rotating, or resizing another device does not resize Codex.
   Phones default to **Wrap**, which displays full logical lines at the device
   width with a visible scrollbar and 500 recent history lines. Both views
-  preserve Codex ANSI text colors using the same shell-style palette. **Grid** retains
+  preserve Codex ANSI text colors using the same shell-style palette.
+  Monochrome bold headings appear green and dim status text appears blue-gray. **Grid** retains
   the native terminal rendering; use **View** arrows to pan your own view, then
   **Follow cursor** to resume automatic tracking.
 - Tap **Shift ⇧**, then **Tab**, **Enter**, or an arrow for that shifted binding.
