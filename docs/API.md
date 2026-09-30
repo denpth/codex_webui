@@ -40,18 +40,33 @@ Already-resolved requests return `404`; invalid decisions return `400`.
 - `GET /models` returns the installed Codex catalog and selected chat model.
   `PUT /config` with `{ "model": "..." }` changes the next chat turn, even after
   a failed or rate-limited turn. Other existing config values are preserved.
-- `GET /terminals` lists PTYs owned by this server.
-- `POST /terminal/connect` accepts `{ "sessionId": "...", "cols": 80, "rows": 24 }`
-  to resume, `{}` for a new Codex terminal, or `{ "terminalId": "..." }` to reconnect.
-  Returns `{ id, ticket, title, sessionId, exited }`. The browser Origin must match
-  Host. If `WEBUI_TOKEN` is configured, supply its bearer token too.
+- `GET /terminals` lists persistent tmux sessions for this WebUI, including those
+  recovered after a WebUI restart. Sessions are isolated from personal tmux sessions.
+- `POST /terminal/connect` accepts `{ "clientVersion": "tmux-terminal-5", "sessionId": "...", "cols": 80, "rows": 24 }`
+  to resume, an omitted session ID for a new Codex terminal, or `terminalId` to
+  reconnect. Returns `{ id, ticket, title, sessionId, exited, paneCols, paneRows }`.
+  The browser Origin must match Host. Supply `WEBUI_TOKEN` as a bearer token if configured.
 - `GET /terminal/ws?ticket=...` upgrades to a WebSocket. Tickets expire after 30
-  seconds and can be consumed once. WebSocket messages are JSON: send
-  `{ "type": "input", "data": "..." }` or `{ "type": "resize", "cols": 80, "rows": 24 }`;
-  receive `ready`, `output`, `exit`, and `error` messages. Up to 2 MiB of output is
-  replayed on reconnect. A browser disconnect does not stop its PTY.
-- `POST /terminal/close` accepts `{ "terminalId": "..." }` and stops that process.
-  There is a limit of eight open terminals, including ended terminals until closed.
+  seconds and can be consumed once. Every WebSocket owns a separate PTY running
+  `tmux attach-session -f ignore-size`; its resize messages only resize that client.
+  The shared Codex pane uses `window-size manual` and retains its initial dimensions.
+- Send `{ "type": "input", "data": "..." }`,
+  `{ "type": "resize", "cols": 80, "rows": 24 }`, or
+  `{ "type": "viewport", "direction": "left" }`. Viewport directions are `left`,
+  `right`, `up`, `down`, and `follow`; they pan only the sending client's view.
+  Receive `ready`, `output`, `exit`, and `error` messages. Tmux paints a fresh screen
+  on attach rather than replaying an ANSI buffer. Native terminal input and Codex
+  output are shared live; unsent message-field drafts are local to their browser.
+- Disconnecting a browser or stopping the WebUI kills only attached tmux clients.
+  Codex keeps running. `POST /terminal/close` with `{ "terminalId": "..." }` explicitly
+  kills that tmux session and closes all its viewers.
+- Limits: eight sessions, 32 attached clients, 256 pending tickets, 10,000 history
+  lines per pane, and 4 MiB queued output per slow WebSocket. Ended sessions count
+  toward the session limit until explicitly closed.
+- `TMUX_CMD` overrides the tmux executable. `WEBUI_TMUX_SOCKET` overrides the
+  dedicated socket name; by default it is derived from the real workspace path.
+  Session metadata is stored in tmux. Its private configuration is stored under
+  `~/.local/state/codex-webui/<socket>/tmux.conf`.
 
 ## Base Configuration
 

@@ -40,6 +40,7 @@ We've all been there: Codex CLI is brilliant, but terminals? Not so much. Overwr
 ### Prerequisites
 - Node.js 18+ (because we're not living in the stone age).
 - OpenAI Codex CLI installed and ready to roll.
+- tmux 3.2+ installed (`brew install tmux` on macOS; `sudo apt install tmux` on Ubuntu/Debian). The terminal backend needs a Unix host; on Windows, run it inside WSL.
 
 ### Current Codex CLI compatibility
 
@@ -91,13 +92,21 @@ directly into the terminal or use the message field below it.
 - **Usage** opens `/usage`. Model changes cannot bypass an account-wide limit.
 - Terminal runs with full filesystem access and approval policy `on-request`.
   This is access as the user running the server, not root privileges.
-- Opening the same live conversation on multiple devices shares one Codex process.
-  Its grid uses the largest column and row counts requested by connected viewers,
-  so a phone cannot shrink an attached desktop. Swipe horizontally to pan a wider
-  terminal on a narrow screen. After the desktop disconnects, it fits the phone.
-- Reloading or disconnecting a browser leaves terminal processes running. Open
-  them under **Open terminals** to reconnect. Closing a terminal or stopping the
-  WebUI process stops its PTY; saved Codex conversations can still be resumed.
+- Each live conversation runs one Codex process in a persistent tmux session.
+  Each browser attaches through its own tmux client with its own screen size.
+  Typing directly in either terminal appears live on the other connected devices.
+  Drafts in the message field remain local until sent.
+- The shared pane keeps the size it had when first opened. Connecting,
+  disconnecting, rotating, or resizing another device does not resize Codex.
+  Smaller screens follow the cursor automatically; use **View** arrows to pan
+  your own view, then **Follow cursor** to resume automatic tracking.
+- Browser disconnects and WebUI restarts detach clients while leaving Codex
+  running. **Open terminals** recovers those sessions after restart. Explicitly
+  closing a terminal stops Codex and disconnects every viewer of that terminal.
+- Memory is bounded by eight sessions (including ended sessions until closed),
+  32 browser clients, 10,000 history lines per pane, and 4 MiB of queued output
+  per slow connection. Disconnected clients are released; no shared output replay
+  buffer is retained in the WebUI server.
 The browser uses the native terminal for conversations. The legacy chat HTTP API
 remains available, but Codex permits only one active writer per conversation; close
 its native terminal before resuming the same thread through that API.
@@ -112,7 +121,7 @@ tailscale serve --bg --https=5055 http://127.0.0.1:5055
 Terminal assets are served locally. WebSocket connections use short-lived,
 single-use tickets issued by an authenticated same-origin POST; other websites
 cannot open a terminal WebSocket through the browser. Keep the service on your
-private tailnet. The terminal backend uses `node-pty`, `ws`, and xterm.js; run
+private tailnet. The terminal backend uses tmux, `node-pty`, `ws`, and xterm.js; run
 `npm install` before starting it. The postinstall script fixes the executable
 permission on node-pty's packaged Unix spawn helper when necessary.
 

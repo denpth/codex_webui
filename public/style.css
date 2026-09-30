@@ -5,4 +5,6 @@
 
 .terminal-status{height:44px;min-height:44px;flex-shrink:0;white-space:nowrap}.terminal-status #terminalStatusText{min-width:0;overflow:hidden;text-overflow:ellipsis}.terminal-status #refreshTerminal{width:82px;flex-shrink:0;font-size:10px;min-height:30px;padding:5px}.terminal-status .terminal-access{overflow:hidden;text-overflow:ellipsis}
 
-#terminalMount{overflow:auto;overscroll-behavior:contain}#terminalHost .xterm{min-height:100%}
+#terminalMount{overflow:hidden}
+
+.terminal-view-controls{display:flex;align-items:center;gap:5px;padding:4px 18px 7px;flex-shrink:0;color:var(--muted);font-size:11px}.terminal-view-controls button{min-height:30px;padding:4px 9px;font-size:11px}.terminal-view-controls button:last-child{margin-left:auto}

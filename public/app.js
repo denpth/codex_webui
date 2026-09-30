@@ -5,6 +5,7 @@ const state = { sessions: [], terminals: [], cursor: null, selected: null, activ
   terminalSessionId: null, socket: null, generation: 0, terminalReady: false, sessionRequest: 0 };
 let term, fit, reconnectTimer, searchTimer;
 let viewportSize = { cols: 80, rows: 24 };
+let paneSize = null;
 let waitingForOtherApp = false, terminalUpdatedAt = 0;
 
 async function api(url, { method = 'GET', body } = {}) {
@@ -157,30 +158,20 @@ function fitTerminal() {
     const selectedSize = localStorage.getItem('terminalTextSize');
     const size = ['12', '14', '16'].includes(selectedSize) ? Number(selectedSize) : matchMedia('(max-width:640px)').matches ? 12 : 14;
     if (term.options.fontSize !== size) term.options.fontSize = size;
-    const dimensions = fit.proposeDimensions();
-    if (dimensions) {
-      const mount = $('terminalMount');
-      const screen = term.element.querySelector('.xterm-screen');
-      const cellWidth = screen.getBoundingClientRect().width / term.cols;
-      const cellHeight = screen.getBoundingClientRect().height / term.rows;
-      // FitAddon does not subtract the outer scrolling container's gutters.
-      dimensions.cols = Math.max(20, dimensions.cols - Math.ceil((mount.offsetWidth - mount.clientWidth) / cellWidth));
-      dimensions.rows = Math.max(5, dimensions.rows - Math.ceil((mount.offsetHeight - mount.clientHeight) / cellHeight));
-      viewportSize = dimensions;
-      socketSend({ type: 'resize', ...viewportSize });
-    }
-    layoutTerminal();
+    fit.fit();
+    viewportSize = { cols: term.cols, rows: term.rows };
+    socketSend({ type: 'resize', ...viewportSize });
+    updateViewportControls();
   } catch {}
 }
-function layoutTerminal() {
-  const screen = term?.element?.querySelector('.xterm-screen');
-  if (!screen) return;
-  // Keep the shared grid intact; narrow viewers pan instead of clipping cells.
-  const scrollbar = term.element.querySelector('.scrollbar.vertical');
-  const gutter = scrollbar?.getBoundingClientRect().width || 14;
-  term.element.style.width = `${Math.ceil(screen.getBoundingClientRect().width + gutter)}px`;
-  term.element.style.height = `${Math.ceil(screen.getBoundingClientRect().height)}px`;
+function updateViewportControls() {
+  $('terminalViewport').hidden = !paneSize || $('terminalHost').hidden ||
+    (viewportSize.cols >= paneSize.cols && viewportSize.rows >= paneSize.rows);
 }
+document.querySelectorAll('[data-pan]').forEach(button => {
+  button.onpointerdown = event => event.preventDefault();
+  button.onclick = () => socketSend({ type: 'viewport', direction: button.dataset.pan });
+});
 function socketSend(payload) {
   if (state.socket?.readyState === WebSocket.OPEN) { state.socket.send(JSON.stringify(payload)); return true; }
   return false;
@@ -221,12 +212,12 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
   $('reconnectButton').hidden = true;
   initTerminal(); fitTerminal();
   let opened;
-  try { opened = await post('/terminal/connect', { clientVersion: 'shared-terminal-4', terminalId, sessionId: session?.id, cols: viewportSize.cols, rows: viewportSize.rows }); }
+  try { opened = await post('/terminal/connect', { clientVersion: 'tmux-terminal-5', terminalId, sessionId: session?.id, cols: viewportSize.cols, rows: viewportSize.rows }); }
   catch (error) {
     if (generation === state.generation) {
       terminalStatus('Unable to connect');
       $('terminalWelcome').hidden = false; $('terminalHost').hidden = true;
-      $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = true;
+      $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = true;
     }
     throw error;
   }
@@ -236,16 +227,13 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
   sessionStorage.setItem('webuiTerminal', opened.id);
   updateHeading(title || session?.title || opened.title, session?.cwd);
   term.reset();
+  paneSize = { cols: opened.paneCols, rows: opened.paneRows }; updateViewportControls();
   const url = new URL('/terminal/ws', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('ticket', opened.ticket);
   const socket = new WebSocket(url); state.socket = socket;
   socket.onopen = () => { if (generation === state.generation) { socketSend({ type: 'resize', cols: viewportSize.cols, rows: viewportSize.rows }); } };
   socket.onmessage = event => {
     if (generation !== state.generation) return;
     const message = JSON.parse(event.data);
-    if ((message.type === 'ready' || message.type === 'size') && message.cols && message.rows) {
-      // Resize in output order so queued replay is parsed at its original size.
-      term.write('', () => { term.resize(message.cols, message.rows); layoutTerminal(); });
-    }
     if (message.type === 'output') term.write(message.data, updateWaitingTerminal);
     if (message.type === 'ready') { terminalStatus(message.exited ? 'Process ended' : 'Connected', !message.exited); if (message.exited) $('reconnectButton').hidden = false; }
     if (message.type === 'exit') { terminalStatus(`Process ended (${message.exitCode})`); term.writeln('\r\n[Terminal ended. Select a saved conversation or start a new one.]'); loadSessions(); loadTerminals(); }
@@ -299,7 +287,7 @@ $('confirmClose').onclick = async () => {
     await post('/terminal/close', { terminalId: state.activeTerminal });
     state.activeTerminal = null; state.terminalReady = false; sessionStorage.removeItem('webuiTerminal');
     $('terminalWelcome').hidden = false; $('terminalHost').hidden = true;
-    $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = true;
+    $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = true;
     $('confirmDialog').close(); updateControls(); await loadTerminals(); loadSessions();
   } catch (error) { report(error); }
 };
@@ -331,7 +319,7 @@ const previousTerminal = sessionStorage.getItem('webuiTerminal');
 if (previousTerminal) connectTerminal({ terminalId: previousTerminal, reconnect: true }).catch(error => {
   sessionStorage.removeItem('webuiTerminal'); state.activeTerminal = null; state.terminalReady = false;
   $('terminalWelcome').hidden = false; $('terminalHost').hidden = true;
-  $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = true; updateControls();
+  $('terminalStatus').hidden = $('terminalKeys').hidden = $('terminalComposer').hidden = $('terminalViewport').hidden = true; updateControls();
 });
 function refreshExternalChanges() { if (!document.hidden) { loadSessions(); loadTerminals(); } }
 setInterval(refreshExternalChanges, 3000);
