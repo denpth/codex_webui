@@ -116,7 +116,7 @@ export class TmuxSessions {
 
   capture(session) {
     return new Promise((resolve, reject) => {
-      execFile(this.tmuxCommand, [...this.args, '-N', 'capture-pane', '-p', '-J', '-S', '-500', '-t', session.name],
+      execFile(this.tmuxCommand, [...this.args, '-N', 'capture-pane', '-p', '-e', '-J', '-S', '-500', '-t', session.name],
         { encoding: 'utf8', env: { ...this.env, TMUX: '' }, timeout: 5000, maxBuffer: 4 * 1024 * 1024 },
         (error, text) => error ? reject(error) : resolve(text.trimEnd()));
     });

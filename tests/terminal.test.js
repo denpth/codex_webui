@@ -148,6 +148,9 @@ test('real tmux shares live typing, keeps pane size fixed and survives WebUI res
   phone.ws.send(JSON.stringify({ type: 'display', wrapped: true }));
   await until(() => phone.messages.some(m => m.type === 'snapshot' && m.text.includes('PHONE_LIVE')));
   assert.equal(pane(), originalPane, 'wrapped snapshots never resize Codex');
+  desktop.ws.send(JSON.stringify({ type: 'input', data: '\x1b[31mCOLOR_CHECK\x1b[0m' }));
+  await until(() => phone.messages.some(m => m.type === 'snapshot' && /\x1b\[[0-9;]*31mCOLOR_CHECK/.test(m.text)));
+
   sessions.key(sessions.list()[0], 'tab');
   await until(() => fs.readFileSync(path.join(dir, 'input.log'), 'utf8').includes('1b5b5a'));
   sessions.key(sessions.list()[0], 'enter');

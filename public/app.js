@@ -1,4 +1,5 @@
 'use strict';
+import { renderAnsi, terminalTheme } from './terminal-colors.js';
 import { terminalEdit } from './mobile-edit.js';
 import { isRetryScreen } from './terminal-refresh.js';
 const $ = id => document.getElementById(id);
@@ -141,7 +142,7 @@ function initTerminal() {
   term = new Terminal({ cursorBlink: true, fontSize: matchMedia('(max-width:640px)').matches ? 12 : 14,
     fontFamily: 'Menlo, Monaco, "Cascadia Code", Consolas, monospace', lineHeight: 1.2,
     scrollback: 10000, convertEol: false, screenReaderMode: true,
-    theme: { background: '#101214', foreground: '#e7ecef', cursor: '#9ee7cb', selectionBackground: '#425b51', black: '#171a1d', green: '#9ee7cb', brightGreen: '#b9f4dc' } });
+    theme: terminalTheme });
   fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open($('terminalMount'));
   term.onData(data => sendTerminal(data));
   term.onTitleChange(title => {
@@ -195,10 +196,11 @@ $('terminalWrapped').onclick = () => {
 };
 function renderSnapshot(text) {
   const output = $('terminalWrapped');
-  if (output.textContent === text) return;
+  if (output.dataset.snapshot === text) return;
+  output.dataset.snapshot = text;
   const follow = output.scrollTop + output.clientHeight >= output.scrollHeight - 30;
   const top = output.scrollTop;
-  output.textContent = text;
+  renderAnsi(output, text);
   output.scrollTop = follow ? output.scrollHeight : top;
   updateWrappedScrollbar();
 }
@@ -300,7 +302,7 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
     if (state.activeTerminal) inputDrafts.set(state.activeTerminal, { value: $('terminalInput').value, sent: sentInput, live: liveInputActive });
     const draft = inputDrafts.get(opened.id);
     $('terminalInput').value = draft?.value || ''; sentInput = draft?.sent || ''; liveInputActive = draft?.live || false; composingInput = false;
-    autoSize($('terminalInput')); $('terminalWrapped').textContent = '';
+    autoSize($('terminalInput')); $('terminalWrapped').textContent = ''; delete $('terminalWrapped').dataset.snapshot;
   }
   state.activeTerminal = opened.id; state.terminalSessionId = opened.sessionId;
   state.selected = session || state.sessions.find(s => s.id === opened.sessionId) || null;

@@ -101,7 +101,8 @@ directly into the terminal or use the message field below it.
 - The shared pane keeps the size it had when first opened. Connecting,
   disconnecting, rotating, or resizing another device does not resize Codex.
   Phones default to **Wrap**, which displays full logical lines at the device
-  width with a visible scrollbar and 500 recent history lines. **Grid** retains
+  width with a visible scrollbar and 500 recent history lines. Both views
+  preserve Codex ANSI text colors using the same shell-style palette. **Grid** retains
   the native terminal rendering; use **View** arrows to pan your own view, then
   **Follow cursor** to resume automatic tracking.
 - Tap **Shift ⇧**, then **Tab**, **Enter**, or an arrow for that shifted binding.
