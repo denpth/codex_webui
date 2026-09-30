@@ -114,6 +114,12 @@ export class TmuxSessions {
     this.run(['send-keys', '-l', '-t', session.name, '--', keys[key]]);
   }
 
+  fit(session, cols, rows) {
+    const size = { cols: dimension(cols, 20, 400), rows: dimension(rows, 5, 200) };
+    this.run(['resize-window', '-t', session.name, '-x', String(size.cols), '-y', String(size.rows)]);
+    return size;
+  }
+
   capture(session) {
     return new Promise((resolve, reject) => {
       execFile(this.tmuxCommand, [...this.args, '-N', 'capture-pane', '-p', '-e', '-J', '-S', '-500', '-t', session.name],

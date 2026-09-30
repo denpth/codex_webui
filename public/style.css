@@ -16,3 +16,16 @@
 #shiftKey[aria-pressed=true]{background:var(--accent);color:#132b23;border-color:var(--accent)}#shiftKey{flex:1.6}.terminal-keys{flex-wrap:wrap;overflow-x:visible}.terminal-keys button{min-width:34px}
 
 #terminalWrapped{scrollbar-width:none}#terminalWrapped::-webkit-scrollbar{display:none}
+
+/* Desktop focus view keeps the native terminal available across the viewport. */
+@media(min-width:641px){
+  .topbar{min-height:52px;padding-top:8px;padding-bottom:8px}
+  .toolbar{min-height:46px;padding-top:6px;padding-bottom:6px}
+  body.terminal-expanded aside,body.terminal-expanded .topbar{display:none}
+  body.terminal-expanded .terminal-keys{display:none}
+  body.terminal-expanded #terminalHost{padding:8px 8px 0}
+  body.terminal-expanded #terminalView:has(#terminalHost:not(.wrapped)) .composer{display:none}
+  body.terminal-expanded .terminal-status{height:28px;min-height:28px;padding-top:3px;padding-bottom:3px}
+  body.terminal-expanded #terminalHost.wrapped #terminalMount{inset:8px 8px 0}
+}
+@media(max-width:640px){#expandTerminal,#fitPane{display:none}}

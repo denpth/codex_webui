@@ -157,6 +157,13 @@ export class TerminalServer {
           if (client.wrapped) this.scheduleCapture(terminal);
         } else if (message.type === 'resize') {
           proc.resize(dimension(message.cols, 20, 400), dimension(message.rows, 5, 200));
+        } else if (!client.exited && message.type === 'fit-pane') {
+          const size = this.sessions.fit(terminal, message.cols, message.rows);
+          for (const [viewer, attached] of this.clients) if (attached.terminal.id === terminal.id) {
+            Object.assign(attached.terminal, size);
+            this.send(viewer, { type: 'pane-size', ...size });
+          }
+          this.scheduleCapture(terminal);
         } else if (message.type === 'viewport' && typeof message.direction === 'string') {
           this.sessions.pan(proc.pid, message.direction);
         } else if (!client.exited && message.type === 'key' && typeof message.key === 'string') {

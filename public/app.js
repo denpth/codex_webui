@@ -127,6 +127,7 @@ function updateControls() {
   $('modelButton').disabled = !state.terminalReady;
   $('usageButton').disabled = !state.terminalReady;
   $('stopButton').disabled = !state.terminalReady;
+  updateViewportControls();
 }
 async function selectSession(session) {
   state.selected = session; updateHeading(session.title, session.cwd); setSidebar(false); clearError(); renderSessions();
@@ -171,7 +172,18 @@ function fitTerminal() {
     updateViewportControls(); updateWrappedScrollbar();
   } catch {}
 }
+$('expandTerminal').onclick = () => {
+  const expanded = document.body.classList.toggle('terminal-expanded');
+  $('expandTerminal').textContent = expanded ? 'Restore' : 'Expand';
+  $('expandTerminal').setAttribute('aria-pressed', String(expanded));
+  requestAnimationFrame(fitTerminal);
+};
+$('fitPane').onclick = () => {
+  fitTerminal(); socketSend({ type: 'fit-pane', ...viewportSize });
+};
 function updateViewportControls() {
+  $('fitPane').hidden = wrappedDisplay || !state.terminalReady || !paneSize ||
+    (viewportSize.cols === paneSize.cols && viewportSize.rows === paneSize.rows);
   $('terminalViewport').hidden = wrappedDisplay || !paneSize || $('terminalHost').hidden ||
     (viewportSize.cols >= paneSize.cols && viewportSize.rows >= paneSize.rows);
 }
@@ -318,6 +330,7 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
     if (generation !== state.generation) return;
     const message = JSON.parse(event.data);
     if (message.type === 'snapshot') renderSnapshot(message.text);
+    if (message.type === 'pane-size') { paneSize = { cols: message.cols, rows: message.rows }; updateViewportControls(); }
     if (message.type === 'output') term.write(codexColors.write(message.data), updateWaitingTerminal);
     if (message.type === 'ready') { terminalStatus(message.exited ? 'Process ended' : 'Connected', !message.exited); if (message.exited) $('reconnectButton').hidden = false; }
     if (message.type === 'exit') { terminalStatus(`Process ended (${message.exitCode})`); term.writeln('\r\n[Terminal ended. Select a saved conversation or start a new one.]'); loadSessions(); loadTerminals(); }

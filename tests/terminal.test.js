@@ -172,6 +172,13 @@ test('real tmux shares live typing, keeps pane size fixed and survives WebUI res
   await once(reattached.ws, 'open');
   await until(() => reattached.messages.filter(m => m.type === 'output').map(m => m.data).join('').includes('PHONE_LIVE'));
   assert.equal(pane(), originalPane);
+  reattached.ws.send(JSON.stringify({ type: 'fit-pane', cols: 180, rows: 40 }));
+  await until(() => reattached.messages.some(m => m.type === 'pane-size' && m.cols === 180 && m.rows === 40));
+  assert.ok(pane().includes('180x40'), 'explicit fit resizes the shared pane');
+  const fittedPane = pane();
+  reattached.ws.send(JSON.stringify({ type: 'resize', cols: 35, rows: 15 }));
+  await pause(150);
+  assert.equal(pane(), fittedPane, 'later viewport changes preserve the explicitly fitted pane');
   terminals.close(opened.id); await once(reattached.ws, 'close');
   assert.equal(recovered.list().length, 0);
 });

@@ -106,6 +106,10 @@ directly into the terminal or use the message field below it.
   Monochrome bold headings appear green and dim status text appears blue-gray. **Grid** retains
   the native terminal rendering; use **View** arrows to pan your own view, then
   **Follow cursor** to resume automatic tracking.
+- On desktop, **Expand** hides the sidebar and extra controls to fill the
+  workspace. **Restore** brings them back. **Fit terminal** explicitly resizes
+  the shared pane to this viewport; automatic device connections still leave
+  its size alone. Wrapped views continue to adapt to their own screen width.
 - Tap **Shift ⇧**, then **Tab**, **Enter**, or an arrow for that shifted binding.
   Shift resets after the next key.
 - Browser disconnects and WebUI restarts detach clients while leaving Codex
