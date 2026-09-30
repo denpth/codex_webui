@@ -4,6 +4,55 @@
 
 Codex WebUI exposes a RESTful HTTP API and Server-Sent Events (SSE) for real-time communication. This document provides complete API specifications for all endpoints.
 
+### App-server compatibility update
+
+The backend now uses `codex app-server --listen stdio://`. HTTP `/message` waits
+for `turn/start` acknowledgement, returns `409` while a turn is active, and returns
+`502` with `{ "ok": false, "error": "..." }` for Codex startup/RPC failures.
+`/resume` and `/restart` also report errors instead of returning premature success.
+`/session-messages` reads the latest 100 chat messages through `thread/items/list`,
+including paginated history. `/shutdown` interrupts an active turn and stops the
+child process, leaving the HTTP server available.
+
+Additional SSE events:
+
+- `codex-error`: `{ text }`, distinct from an EventSource connection error.
+- `turn-completed`: `{ status }` (`completed`, `failed`, or `interrupted`).
+- `approval`: `{ id, method, params }`, a pending Codex approval or input request.
+- `approval-resolved`: `{ id }`, remove the corresponding prompt.
+
+`delta` and `message` include an item `id` so separately streamed replies do not
+mix. `status` includes `thread_id` and `busy`. Pending approval prompts are replayed
+when the browser reconnects.
+
+`POST /approval` requires the same authentication as other writes. Send
+`{ "id": <request id>, "decision": "accept" | "decline" | "cancel" }` for
+command/file/permission requests. Permission acceptance grants only the requested
+permissions for the current turn. For `item/tool/requestUserInput`, send
+`{ "id": <request id>, "answers": { "question_id": { "answers": ["text"] } } }`.
+Already-resolved requests return `404`; invalid decisions return `400`.
+
+### Terminal workspace API
+
+- `GET /sessions?cursor=...&q=...` reads `thread/list` and returns conversation
+  `id`, contextual `title`, `cwd`, `path`, `model`, and `mtimeMs`, plus `nextCursor`.
+- `POST /resume` also accepts `{ "thread_id": "..." }` for modern saved threads.
+- `GET /models` returns the installed Codex catalog and selected chat model.
+  `PUT /config` with `{ "model": "..." }` changes the next chat turn, even after
+  a failed or rate-limited turn. Other existing config values are preserved.
+- `GET /terminals` lists PTYs owned by this server.
+- `POST /terminal/connect` accepts `{ "sessionId": "...", "cols": 80, "rows": 24 }`
+  to resume, `{}` for a new Codex terminal, or `{ "terminalId": "..." }` to reconnect.
+  Returns `{ id, ticket, title, sessionId, exited }`. The browser Origin must match
+  Host. If `WEBUI_TOKEN` is configured, supply its bearer token too.
+- `GET /terminal/ws?ticket=...` upgrades to a WebSocket. Tickets expire after 30
+  seconds and can be consumed once. WebSocket messages are JSON: send
+  `{ "type": "input", "data": "..." }` or `{ "type": "resize", "cols": 80, "rows": 24 }`;
+  receive `ready`, `output`, `exit`, and `error` messages. Up to 2 MiB of output is
+  replayed on reconnect. A browser disconnect does not stop its PTY.
+- `POST /terminal/close` accepts `{ "terminalId": "..." }` and stops that process.
+  There is a limit of eight open terminals, including ended terminals until closed.
+
 ## Base Configuration
 
 ### Server Configuration

@@ -1,13 +1,14 @@
 {
   "name": "codex-webui",
   "version": "1.0.0",
-  "description": "A tiny, dependency-free Web UI that wraps the local OpenAI Codex CLI",
+  "description": "A responsive Codex workspace with native terminal, chat, and conversation history",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "test": "node --test tests/*.test.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "postinstall": "node scripts/prepare-terminal.js"
   },
   "keywords": [
     "codex",
@@ -23,10 +24,19 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/harryneopotter/Codex-webui.git"
+    "url": "https://github.com/denpth/codex_webui.git"
   },
-  "homepage": "https://codex-webui.hnpart.xyz/",
+  "homepage": "https://github.com/denpth/codex_webui#readme",
   "bugs": {
-    "url": "https://github.com/harryneopotter/Codex-webui/issues"
+    "url": "https://github.com/denpth/codex_webui/issues"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.22.0"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
   }
 }

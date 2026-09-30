@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Minimal dependency-free Web UI to chat with Codex CLI (proto)
+// Minimal dependency-free Web UI to chat with Codex CLI (app-server)
 // - Serves a static chat page
 // - Uses SSE to stream Codex output
 // - Launches/keeps a single Codex session, supports multiple messages
@@ -8,7 +8,9 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { spawn } from 'child_process';
+import { CodexClient } from './codex-client.js';
+import { TerminalServer, sameOrigin } from './terminal-server.js';
+import { sessionTitle } from './session-titles.js';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -40,28 +42,38 @@ function setCORS(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 function requireAuth(req) {
+  if (req.headers.origin && !sameOrigin(req)) return false;
   if (!TOKEN) return true; // localhost default: open
   return req.headers.authorization === `Bearer ${TOKEN}`;
 }
 
 const CODEX_CMD = process.env.CODEX_CMD || 'codex';
 // Anchor workdir to the project root (parent of codex-webui) unless overridden
-const ROOT_DIR = path.resolve(__dirname, '..');
+const ROOT_DIR = __dirname;
 const WORKDIR = process.env.CODEX_WORKDIR ? path.resolve(process.env.CODEX_WORKDIR) : ROOT_DIR;
 // Read memory from the project-level .codex by default so it stays consistent
 const MEMORY_FILE = process.env.CODEX_MEMORY_FILE || path.join(WORKDIR, '.codex', 'memory.md');
-const CONFIG_FILE = path.join(__dirname, 'config.toml');
+const CONFIG_FILE = process.env.WEBUI_CONFIG_FILE || path.join(__dirname, 'config.toml');
 
-let codexProc = null;
-let sessionConfigured = false;
-let currentRequestId = null;
-let sseClients = new Set();
-let messageBuffer = '';
+const client = new CodexClient({ command: CODEX_CMD, cwd: WORKDIR });
+let threadId = null;
+let threadReady = null;
+let busy = false;
+let activeTurnId = null;
+let resumeChecked = false;
+const pendingApprovals = new Map();
+const messageBuffers = new Map();
+const sseClients = new Set();
 let LAST_RESUME_PATH = null;
-const HISTORY_FILE = path.join(__dirname, 'history.json');
-
-const SESS_ROOT = path.join(os.homedir(), '.codex', 'sessions');
-const isWithinSessions = (p) => p && path.resolve(p).startsWith(path.resolve(SESS_ROOT));
+const HISTORY_FILE = process.env.WEBUI_HISTORY_FILE || path.join(__dirname, 'history.json');
+const SESS_ROOT = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
+const isWithinSessions = p => {
+  if (!p) return false;
+  try {
+    const relative = path.relative(fs.realpathSync(SESS_ROOT), fs.realpathSync(p));
+    return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+  } catch { return false; }
+};
 
 function ensureMemoryFile() {
   const dir = path.dirname(MEMORY_FILE);
@@ -136,18 +148,18 @@ function broadcastStatus() {
     resume_path: LAST_RESUME_PATH,
     resume_meta: meta,
     memory: facts,
-    config: getConfigSafe()
+    config: getConfigSafe(), thread_id: threadId, busy
   });
 }
 
 // ---- Config (TOML) helpers (module scope) ----
 function defaultConfig() {
   return {
-    model: 'gpt-5',
+    model: '',
     'tools.web_search_request': false,
     use_streamable_shell: true,
-    sandbox_mode: 'danger-full-access',
-    approval_policy: 'never',
+    sandbox_mode: 'workspace-write',
+    approval_policy: 'on-request',
     instructions_extra: ''
   };
 }
@@ -161,7 +173,7 @@ function getConfigSafe() {
 }
 
 function writeConfig(obj) {
-  const cfg = Object.assign(defaultConfig(), obj || {});
+  const cfg = Object.assign(getConfigSafe(), obj || {});
   const toml = dumpToml(cfg);
   fs.writeFileSync(CONFIG_FILE, toml, 'utf8');
 }
@@ -177,7 +189,7 @@ function parseToml(src, fallback) {
     const key = line.slice(0, idx).trim();
     let value = line.slice(idx + 1).trim();
     if (value.startsWith('"') && value.endsWith('"')) {
-      value = value.slice(1, -1);
+      try { value = JSON.parse(value); } catch { value = value.slice(1, -1); }
     } else if (value === 'true' || value === 'false') {
       value = value === 'true';
     } else if (/^-?\d+(?:\.\d+)?$/.test(value)) {
@@ -193,258 +205,189 @@ function dumpToml(obj) {
   const keys = Object.keys(obj || {});
   keys.forEach(k => {
     const v = obj[k];
-    if (typeof v === 'string') parts.push(`${k} = "${v.replace(/"/g, '\\"')}"`);
+    if (typeof v === 'string') parts.push(`${k} = ${JSON.stringify(v)}`);
     else if (typeof v === 'boolean') parts.push(`${k} = ${v ? 'true' : 'false'}`);
     else parts.push(`${k} = ${String(v)}`);
   });
   return parts.join('\n') + '\n';
 }
 
-function startCodexIfNeeded(cb) {
-  if (codexProc) return cb();
+function rpcError(res, error) {
+  setCORS(res);
+  res.writeHead(error.status || 502, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: error.message }));
+}
 
-  function findLatestRollout() {
-    try {
-      const root = path.join(os.homedir(), '.codex', 'sessions');
-      if (!fs.existsSync(root)) return null;
-      let latest = null;
-      let latestMtime = 0;
-      const stack = [root];
-      while (stack.length) {
-        const dir = stack.pop();
-        let entries = [];
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-        for (const ent of entries) {
-          const full = path.join(dir, ent.name);
-          if (ent.isDirectory()) { stack.push(full); continue; }
-          if (/^rollout-.*\.jsonl$/.test(ent.name)) {
-            let stat; try { stat = fs.statSync(full); } catch { continue; }
-            if (stat.mtimeMs > latestMtime) { latestMtime = stat.mtimeMs; latest = full; }
-          }
-        }
-      }
-      return latest;
-    } catch { return null; }
-  }
-
+async function threadOptions() {
   const cfg = getConfigSafe();
-  const autoInstructions = [
-    'Act autonomously without asking for confirmations.',
-    'Use apply_patch to create/modify files in the current working directory.',
-    'Use exec_command to run, build, and test as needed.',
-    'Prefer concise status updates over questions.',
-    'Create files in the root directory unless a subdirectory is requested.',
-    'When you identify a reusable, non-sensitive fact that will help in future sessions, emit a single line starting with "SAVE_MEMORY: " followed by the fact (<=140 chars). Never store secrets or tokens.'
-  ].join(' ') + (cfg['instructions_extra'] ? (' ' + String(cfg['instructions_extra'])) : '');
-
-  const args = [
-    '--cd', WORKDIR,
-    'proto',
-    '-c', 'include_apply_patch_tool=true',
-    '-c', 'include_plan_tool=true',
-    '-c', `tools.web_search_request=${cfg['tools.web_search_request'] === true}`,
-    '-c', `use_experimental_streamable_shell_tool=${cfg['use_streamable_shell'] !== false}`,
-    '-c', `sandbox_mode=${cfg['sandbox_mode'] || 'danger-full-access'}`,
-    '-c', `instructions=${JSON.stringify(autoInstructions)}`,
-  ];
-  if (cfg['model']) {
-    args.push('-c', `model=${cfg['model']}`);
-  }
-
-  // Enable resume of last rollout unless explicitly disabled
-  const resumeAllowed = !['0', 'false', 'no', 'off'].includes(String(process.env.CODEX_RESUME || '1').toLowerCase());
-  if (resumeAllowed) {
-    const resumePath = findLatestRollout();
-    if (resumePath) {
-      args.push('-c', `experimental_resume=${resumePath}`);
-      LAST_RESUME_PATH = resumePath;
-      // best-effort notice after SSE clients attach
-      setTimeout(() => {
-        broadcast('system', { text: `Resuming from rollout: ${resumePath}` });
-        broadcastStatus();
-      }, 500);
-      recordResume(resumePath);
+  let model = cfg.model;
+  if (!model) {
+    const effective = await client.request('config/read', { cwd: WORKDIR });
+    model = effective.config.model;
+    if (!model) {
+      const catalog = await client.request('model/list', {});
+      model = catalog.data.find(entry => entry.isDefault)?.model;
     }
   }
-
-  // Explicitly configure stdio to avoid "stdout is not a terminal" errors
-  // Pass environment with TERM set to help Codex run in non-TTY mode
-  const spawnEnv = { ...process.env, TERM: 'dumb' };
-  codexProc = spawn(CODEX_CMD, args, { 
-    cwd: WORKDIR, 
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: spawnEnv
-  });
-
-  codexProc.stdout.setEncoding('utf8');
-  codexProc.stderr.setEncoding('utf8');
-
-  codexProc.stderr.on('data', (d) => {
-    broadcast('stderr', { text: d.toString() });
-  });
-
-  codexProc.on('exit', (code) => {
-    broadcast('system', { text: `Codex exited with code ${code}` });
-    codexProc = null;
-    sessionConfigured = false;
-  });
-
-  codexProc.stdout.on('data', (chunk) => {
-    const lines = chunk.split(/\r?\n/);
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line) continue;
-      let event;
-      try { event = JSON.parse(line); } catch { continue; }
-      const msg = (event && event.msg) || {};
-      const type = msg.type;
-
-      if (type === 'session_configured') {
-        sessionConfigured = true;
-        // Set auto-approve policy
-        const cfg2 = getConfigSafe();
-        const ctl = { id: `ctl_${Date.now()}`, op: { type: 'override_turn_context', approval_policy: cfg2['approval_policy'] || 'never', sandbox_policy: { mode: cfg2['sandbox_mode'] || 'danger-full-access' } } };
-        try { codexProc.stdin.write(JSON.stringify(ctl) + '\n'); } catch {}
-        broadcast('system', { text: 'Codex session configured' });
-        if (LAST_RESUME_PATH) recordResume(LAST_RESUME_PATH);
-      }
-
-      if (type === 'agent_message_delta') {
-        const delta = msg.delta || '';
-        messageBuffer += delta;
-        broadcast('delta', { text: delta });
-      }
-
-      if (type === 'agent_message') {
-        // Flush any buffer (or direct message)
-        if (!messageBuffer) {
-          const m = msg.message;
-          if (m) messageBuffer = m;
-        }
-        if (messageBuffer) {
-          saveMemoryFactsFromText(messageBuffer);
-          broadcastStatus();
-          broadcast('message', { text: messageBuffer });
-          messageBuffer = '';
-        }
-      }
-
-      if (type === 'exec_command_begin') {
-        broadcast('tool', { name: 'Bash', detail: (msg.command || []).join(' ') });
-      }
-      if (type === 'patch_apply_begin') {
-        broadcast('tool', { name: 'Edit', detail: 'apply_patch' });
-      }
-      if (type === 'task_complete') {
-        broadcast('system', { text: 'Task complete' });
-      }
-      if (type === 'error') {
-        broadcast('error', { text: msg.message || 'Error' });
-      }
-    }
-  });
-
-  cb();
+  return {
+    cwd: WORKDIR,
+    ...(model ? { model } : {}),
+    approvalPolicy: cfg.approval_policy === 'ask' ? 'on-request' : cfg.approval_policy,
+    sandbox: cfg.sandbox_mode,
+    config: { web_search: cfg['tools.web_search_request'] ? 'live' : 'disabled' },
+    developerInstructions: [
+      'When the user asks you to remember a non-sensitive fact, emit a line starting with "SAVE_MEMORY: " followed by the fact. Never store secrets or tokens.',
+      cfg.instructions_extra || ''
+    ].join(' ')
+  };
 }
 
-function stopCodex(cb) {
-  if (!codexProc) return cb();
-  try {
-    codexProc.stdin.write(JSON.stringify({ id: 'shutdown', op: { type: 'shutdown' } }) + '\n');
-  } catch {}
-  const proc = codexProc;
-  codexProc = null;
-  setTimeout(() => {
-    try { proc.kill(); } catch {}
-    cb();
-  }, 500);
+function sessionIdFromPath(file) {
+  if (!isWithinSessions(file)) throw new Error('Invalid or missing session file');
+  // Read only the metadata prefix; paginated rollouts can have large sidecars.
+  const fd = fs.openSync(file, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  let text;
+  try { text = buffer.subarray(0, fs.readSync(fd, buffer)).toString('utf8'); }
+  finally { fs.closeSync(fd); }
+  for (const line of text.split(/\r?\n/)) {
+    try {
+      const data = JSON.parse(line);
+      if (data.type === 'session_meta' && data.payload?.id) return data.payload.id;
+      if (data.id && data.cwd) return data.id;
+    } catch {}
+  }
+  const match = path.basename(file).match(/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\.jsonl$/i);
+  if (match) return match[1];
+  throw new Error('Cannot find the Codex thread ID in this session');
 }
 
-function startCodexWithResume(resumePath, cb) {
-  stopCodex(() => {
-    LAST_RESUME_PATH = resumePath || null;
-    // Force start with specific resume
-    const cfg = getConfigSafe();
-    const autoInstructions = [
-      'Act autonomously without asking for confirmations.',
-      'Use apply_patch to create/modify files in the current working directory.',
-      'Use exec_command to run, build, and test as needed.',
-      'Prefer concise status updates over questions.',
-      'Create files in the root directory unless a subdirectory is requested.',
-      'When you identify a reusable, non-sensitive fact that will help in future sessions, emit a single line starting with "SAVE_MEMORY: " followed by the fact (<=140 chars). Never store secrets or tokens.'
-    ].join(' ') + (cfg['instructions_extra'] ? (' ' + String(cfg['instructions_extra'])) : '');
-    const args = [
-      '--cd', WORKDIR,
-      'proto',
-      '-c', 'include_apply_patch_tool=true',
-      '-c', 'include_plan_tool=true',
-      '-c', `tools.web_search_request=${cfg['tools.web_search_request'] === true}`,
-      '-c', `use_experimental_streamable_shell_tool=${cfg['use_streamable_shell'] !== false}`,
-      '-c', `sandbox_mode=${cfg['sandbox_mode'] || 'danger-full-access'}`,
-      '-c', `instructions=${JSON.stringify(autoInstructions)}`,
-    ];
-    if (cfg['model']) { args.push('-c', `model=${cfg['model']}`); }
-    if (resumePath) {
-      args.push('-c', `experimental_resume=${resumePath}`);
-    }
-    // Explicitly configure stdio to avoid "stdout is not a terminal" errors
-    // Pass environment with TERM set to help Codex run in non-TTY mode
-    const spawnEnv = { ...process.env, TERM: 'dumb' };
-    codexProc = spawn(CODEX_CMD, args, { 
-      cwd: WORKDIR, 
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: spawnEnv
-    });
-    codexProc.stdout.setEncoding('utf8');
-    codexProc.stderr.setEncoding('utf8');
-    codexProc.stderr.on('data', (d) => broadcast('stderr', { text: d.toString() }));
-    codexProc.on('exit', (code) => {
-      broadcast('system', { text: `Codex exited with code ${code}` });
-      codexProc = null;
-      sessionConfigured = false;
-    });
-    codexProc.stdout.on('data', (chunk) => {
-      const lines = chunk.split(/\r?\n/);
-      for (const raw of lines) {
-        const line = raw.trim();
-        if (!line) continue;
-        let event; try { event = JSON.parse(line); } catch { continue; }
-        const msg = event.msg || {}; const type = msg.type;
-        if (type === 'session_configured') {
-          // set approvals
-          const cfg2 = getConfigSafe();
-          const ctl = { id: `ctl_${Date.now()}`, op: { type: 'override_turn_context', approval_policy: cfg2['approval_policy'] || 'never', sandbox_policy: { mode: cfg2['sandbox_mode'] || 'danger-full-access' } } };
-          try { codexProc.stdin.write(JSON.stringify(ctl) + '\n'); } catch {}
-          broadcast('system', { text: 'Codex session configured' });
-          if (LAST_RESUME_PATH) recordResume(LAST_RESUME_PATH);
-          broadcastStatus();
-        }
-        if (type === 'agent_message_delta') {
-          const delta = msg.delta || '';
-          messageBuffer += delta;
-          broadcast('delta', { text: delta });
-        }
-        if (type === 'agent_message') {
-          if (!messageBuffer) { const m = msg.message; if (m) messageBuffer = m; }
-          if (messageBuffer) {
-            saveMemoryFactsFromText(messageBuffer);
-            broadcastStatus();
-            broadcast('message', { text: messageBuffer });
-            messageBuffer = '';
-          }
-        }
-        if (type === 'exec_command_begin') broadcast('tool', { name: 'Bash', detail: (msg.command || []).join(' ') });
-        if (type === 'patch_apply_begin') broadcast('tool', { name: 'Edit', detail: 'apply_patch' });
-        if (type === 'task_complete') broadcast('system', { text: 'Task complete' });
-        if (type === 'error') broadcast('error', { text: msg.message || 'Error' });
+async function ensureThread() {
+  if (threadReady) return threadReady;
+  threadReady = (async () => {
+    await client.start();
+    if (!resumeChecked) {
+      resumeChecked = true;
+      if (!['0', 'false', 'no', 'off'].includes(String(process.env.CODEX_RESUME || '1').toLowerCase())) {
+        LAST_RESUME_PATH = scanSessions()[0]?.path || null;
       }
+    }
+    const id = threadId || (LAST_RESUME_PATH ? sessionIdFromPath(LAST_RESUME_PATH) : null);
+    const result = await client.request(id ? 'thread/resume' : 'thread/start', {
+      ...await threadOptions(), ...(id ? { threadId: id, excludeTurns: true } : {})
     });
-    cb();
-  });
+    threadId = result.thread.id;
+    LAST_RESUME_PATH = result.thread.path || LAST_RESUME_PATH;
+    if (LAST_RESUME_PATH) recordResume(LAST_RESUME_PATH);
+    broadcast('system', { text: id ? 'Codex session resumed' : 'Codex session ready' });
+    broadcastStatus();
+    return threadId;
+  })();
+  try { return await threadReady; }
+  catch (error) { threadReady = null; throw error; }
+}
+
+function clearApprovals() {
+  for (const id of pendingApprovals.keys()) broadcast('approval-resolved', { id });
+  pendingApprovals.clear();
+}
+
+client.on('disconnect', error => {
+  threadReady = null;
+  busy = false;
+  activeTurnId = null;
+  messageBuffers.clear();
+  clearApprovals();
+  broadcast('system', { text: error.message });
+  broadcastStatus();
+});
+client.on('stderr', text => console.error(text.trimEnd()));
+client.on('notification', ({ method, params: p = {} }) => {
+  if (p.threadId && p.threadId !== threadId) return;
+  if (method === 'item/agentMessage/delta') {
+    messageBuffers.set(p.itemId, (messageBuffers.get(p.itemId) || '') + p.delta);
+    broadcast('delta', { text: p.delta, id: p.itemId });
+  }
+  if (method === 'item/completed' && p.item?.type === 'agentMessage') {
+    const text = p.item.text || messageBuffers.get(p.item.id) || '';
+    messageBuffers.delete(p.item.id);
+    saveMemoryFactsFromText(text);
+    broadcast('message', { text, id: p.item.id });
+  }
+  if (method === 'item/started') {
+    const item = p.item || {};
+    if (item.type === 'commandExecution') broadcast('tool', { name: 'Shell', detail: item.command });
+    if (item.type === 'fileChange') broadcast('tool', { name: 'Edit', detail: (item.changes || []).map(c => c.path).join(', ') });
+    if (item.type === 'mcpToolCall') broadcast('tool', { name: item.server, detail: item.tool });
+  }
+  if (method === 'turn/started') { busy = true; activeTurnId = p.turn.id; broadcastStatus(); }
+  if (method === 'turn/completed') {
+    busy = false;
+    activeTurnId = null;
+    messageBuffers.clear();
+    clearApprovals();
+    const turn = p.turn || {};
+    broadcast(turn.status === 'failed' ? 'codex-error' : 'system', {
+      text: turn.status === 'completed' ? 'Task complete' : turn.error?.message || `Turn ${turn.status}`
+    });
+    broadcast('turn-completed', { status: turn.status });
+    broadcastStatus();
+  }
+  if (method === 'error') broadcast('codex-error', { text: p.error?.message || p.message || 'Codex error' });
+  if (method === 'serverRequest/resolved') {
+    pendingApprovals.delete(p.requestId);
+    broadcast('approval-resolved', { id: p.requestId });
+  }
+});
+client.on('request', request => {
+  const { id, method, params = {} } = request;
+  if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput'].includes(method)) {
+    pendingApprovals.set(id, request);
+    broadcast('approval', request);
+  } else {
+    // Unsupported server requests must receive a response, never an implicit approval.
+    client.write({ id, error: { code: -32601, message: `WebUI does not support ${method}` } });
+    broadcast('codex-error', { text: `Unsupported Codex request: ${method}` });
+  }
+});
+
+async function stopCodex() {
+  await client.stop();
+  threadReady = null;
+}
+
+async function startCodexWithResume(resumePath, explicitId = null) {
+  if (busy) throw Object.assign(new Error('Stop the active turn before switching sessions'), { status: 409 });
+  // Validate before stopping a working session.
+  const id = explicitId || (resumePath ? sessionIdFromPath(resumePath) : null);
+  await stopCodex();
+  threadId = id;
+  LAST_RESUME_PATH = resumePath;
+  resumeChecked = true;
+  await ensureThread();
+}
+
+async function readTranscript(selectedId) {
+  if (!selectedId) {
+    if (!threadId && !LAST_RESUME_PATH) return [];
+    await ensureThread();
+  } else await client.start();
+  const messages = [];
+  let cursor;
+  do {
+    const page = await client.request('thread/items/list', { threadId: selectedId || threadId, limit: 100, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
+    for (const entry of page.data) {
+      const item = entry.item;
+      if (item.type === 'agentMessage') messages.push({ role: 'assistant', text: item.text });
+      if (item.type === 'userMessage') messages.push({ role: 'user', text: item.content.filter(c => c.type === 'text').map(c => c.text).join('\n') });
+    }
+    cursor = page.nextCursor;
+  } while (cursor && messages.length < 100);
+  return messages.slice(0, 100).reverse();
 }
 
 function scanSessions() {
-  const root = path.join(os.homedir(), '.codex', 'sessions');
+  const root = SESS_ROOT;
   const out = [];
   const stack = [root];
   while (stack.length) {
@@ -470,31 +413,6 @@ function readHistory() {
   } catch { return { entries: [] }; }
 }
 
-function parseSessionMessages(filePath) {
-  const out = [];
-  try {
-    if (!filePath || !fs.existsSync(filePath)) return out;
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const lines = raw.split(/\r?\n/);
-    for (const line of lines) {
-      const s = line.trim(); if (!s) continue;
-      let obj; try { obj = JSON.parse(s); } catch { continue; }
-      if (obj.type === 'message' && obj.role && obj.content && Array.isArray(obj.content)) {
-        const text = obj.content.map(c => c && c.text).filter(Boolean).join('\n');
-        if (text) out.push({ role: obj.role, text });
-      }
-      // Fallback: proto event styles
-      const msg = obj && obj.msg;
-      if (msg && (msg.type === 'user_input' || msg.type === 'agent_message')) {
-        if (msg.type === 'user_input' && msg.text) out.push({ role: 'user', text: String(msg.text) });
-        if (msg.type === 'agent_message' && msg.message) out.push({ role: 'assistant', text: String(msg.message) });
-      }
-    }
-  } catch {}
-  // limit to last 100
-  return out.slice(-100);
-}
-
 function writeHistory(h) {
   try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(h, null, 2)); } catch {}
 }
@@ -510,37 +428,78 @@ function recordResume(resumePath) {
   writeHistory(h);
 }
 
-function sendUserInput(text) {
-  if (!codexProc) return;
-  const facts = readMemoryFacts();
-  let memoryBlock = '';
-  if (facts.length) {
-    memoryBlock = '\n\n<memory>\n' + facts.map(f => `- ${f}`).join('\n') + '\n</memory>\n';
-  }
-  const finalText = text + memoryBlock;
-  const items = [{ type: 'text', text: finalText }];
-  const id = `msg_${Date.now().toString(16)}`;
-  currentRequestId = id;
-  const payload = { id, op: { type: 'user_input', items } };
-  codexProc.stdin.write(JSON.stringify(payload) + '\n');
+async function sendUserInput(text) {
+  if (busy) throw Object.assign(new Error('A turn is already running'), { status: 409 });
+  busy = true;
+  try {
+    await ensureThread();
+    const facts = readMemoryFacts();
+    const memory = facts.length ? '\n\n<memory>\n' + facts.map(f => `- ${f}`).join('\n') + '\n</memory>' : '';
+    const options = await threadOptions();
+    await client.request('turn/start', { threadId, model: options.model, approvalPolicy: options.approvalPolicy, input: [{ type: 'text', text: text + memory }] });
+  } catch (error) { busy = false; broadcastStatus(); throw error; }
 }
 
 function serveStatic(req, res) {
   const url = req.url.split('?')[0];
   const root = path.join(__dirname, 'public');
-  let filePath = path.join(root, url === '/' ? 'index.html' : url);
-  if (!filePath.startsWith(root)) { setCORS(res); res.writeHead(403); return res.end('Forbidden'); }
+  const vendor = {
+    '/vendor/xterm.js': '@xterm/xterm/lib/xterm.js',
+    '/vendor/xterm.css': '@xterm/xterm/css/xterm.css',
+    '/vendor/addon-fit.js': '@xterm/addon-fit/lib/addon-fit.js'
+  };
+  let filePath = vendor[url] ? path.join(__dirname, 'node_modules', vendor[url]) : path.join(root, url === '/' ? 'index.html' : url);
+  if (!vendor[url] && !filePath.startsWith(root + path.sep)) { setCORS(res); res.writeHead(403); return res.end('Forbidden'); }
   fs.readFile(filePath, (err, data) => {
     if (err) { setCORS(res); res.writeHead(404); return res.end('Not Found'); }
     const ext = path.extname(filePath);
     const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript' };
     setCORS(res);
-    res.writeHead(200, { 'Content-Type': types[ext] || 'text/plain' });
+    res.writeHead(200, { 'Content-Type': types[ext] || 'text/plain', 'Cache-Control': 'no-store' });
     res.end(data);
   });
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/models') {
+    try {
+      await client.start();
+      const catalog = await client.request('model/list', { limit: 100 });
+      const effective = await client.request('config/read', { cwd: WORKDIR });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ models: catalog.data.map(m => ({ id: m.model, name: m.displayName, isDefault: m.isDefault })),
+        selected: getConfigSafe().model || effective.config.model || catalog.data.find(m => m.isDefault)?.model }));
+    } catch (error) { return rpcError(res, error); }
+  }
+  if (req.method === 'GET' && req.url === '/terminals') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ terminals: terminals.list() }));
+  }
+  if (req.method === 'POST' && ['/terminal/connect', '/terminal/close'].includes(req.url)) {
+    if (!requireAuth(req) || !sameOrigin(req)) return rpcError(res, { status: 403, message: 'Open the terminal from this WebUI.' });
+    try {
+      const body = await readJSON(req);
+      if (req.url === '/terminal/close') {
+        terminals.close(body.terminalId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      if (body.clientVersion !== 'stable-terminal-3') {
+        throw Object.assign(new Error('This page is out of date. Reload the WebUI to reconnect.'), { status: 426 });
+      }
+      let session;
+      if (body.sessionId && !body.terminalId) {
+        await client.start();
+        session = (await client.request('thread/read', { threadId: body.sessionId })).thread;
+        if (busy && threadId === session.id) throw Object.assign(new Error('Stop the active chat turn before opening it in Terminal.'), { status: 409 });
+      }
+      const opened = terminals.open({ terminalId: body.terminalId, sessionId: session?.id,
+        title: session ? sessionTitle(session) : undefined, cwd: session?.cwd,
+        model: getConfigSafe().model || undefined, cols: body.cols, rows: body.rows });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(opened));
+    } catch (error) { return rpcError(res, error); }
+  }
   // Basic CORS/preflight support so UI can be hosted elsewhere
   if (req.method === 'OPTIONS') {
     setCORS(res);
@@ -558,9 +517,10 @@ const server = http.createServer((req, res) => {
     sseClients.add(res);
     // Push current status to the newly connected client
     try {
-      const init = `event: status\n` + `data: ${JSON.stringify({ resumed: !!LAST_RESUME_PATH, resume_path: LAST_RESUME_PATH, resume_meta: getResumeMeta(), memory: readMemoryFacts() })}\n\n`;
+      const init = `event: status\n` + `data: ${JSON.stringify({ resumed: !!LAST_RESUME_PATH, resume_path: LAST_RESUME_PATH, resume_meta: getResumeMeta(), memory: readMemoryFacts(), thread_id: threadId, busy })}\n\n`;
       res.write(init);
     } catch {}
+    for (const request of pendingApprovals.values()) res.write(`event: approval\ndata: ${JSON.stringify(request)}\n\n`);
     req.on('close', () => sseClients.delete(res));
     return;
   }
@@ -657,21 +617,46 @@ const server = http.createServer((req, res) => {
     if (!requireAuth(req)) { setCORS(res); res.writeHead(401); return res.end(); }
     let body = '';
     req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      let text;
+      try { ({ text } = JSON.parse(body || '{}')); }
+      catch { return rpcError(res, { status: 400, message: 'Bad JSON' }); }
+      if (typeof text !== 'string' || !text.trim() || text.length > 16*1024) return rpcError(res, { status: 400, message: 'Missing or oversized text' });
+      try {
+        await sendUserInput(text.trim());
+        setCORS(res);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, thread_id: threadId }));
+      } catch (error) { rpcError(res, error); }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/approval') {
+    if (!requireAuth(req)) { setCORS(res); res.writeHead(401); return res.end(); }
+    let body = '';
+    req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const { text } = JSON.parse(body || '{}');
-        if (typeof text !== 'string' || !text.trim() || text.length > 16*1024) {
-          setCORS(res); res.writeHead(400); return res.end('Missing text');
+        const { id, decision, answers } = JSON.parse(body);
+        const request = pendingApprovals.get(id);
+        if (!request) return rpcError(res, { status: 404, message: 'Request is no longer pending' });
+        let result;
+        if (request.method === 'item/tool/requestUserInput') {
+          if (!answers || typeof answers !== 'object') throw new Error('Missing answers');
+          result = { answers };
+        } else {
+          if (!['accept', 'decline', 'cancel'].includes(decision)) throw new Error('Invalid decision');
+          result = request.method === 'item/permissions/requestApproval'
+            ? { permissions: decision === 'accept' ? request.params.permissions : {}, scope: 'turn' }
+            : { decision };
         }
-        startCodexIfNeeded(() => {
-          sendUserInput(text.trim());
-          setCORS(res);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        });
-      } catch (e) {
-        setCORS(res); res.writeHead(400); res.end('Bad JSON');
-      }
+        client.respond(id, result);
+        pendingApprovals.delete(id);
+        broadcast('approval-resolved', { id });
+        setCORS(res); res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (error) { rpcError(res, { status: 400, message: error.message }); }
     });
     return;
   }
@@ -704,38 +689,51 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && req.url === '/restart') {
     if (!requireAuth(req)) { setCORS(res); res.writeHead(401); return res.end(); }
-    startCodexWithResume(LAST_RESUME_PATH || null, () => {
-      setCORS(res);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+    try {
+      await startCodexWithResume(LAST_RESUME_PATH);
+      setCORS(res); res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, resume_path: LAST_RESUME_PATH }));
-    });
+    } catch (error) { rpcError(res, error); }
     return;
   }
 
-  if (req.method === 'GET' && req.url === '/sessions') {
-    const list = scanSessions();
-    setCORS(res);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ sessions: list, current: LAST_RESUME_PATH }));
+  if (req.method === 'GET' && (req.url === '/sessions' || req.url.startsWith('/sessions?'))) {
+    try {
+      await client.start();
+      const url = new URL(req.url, 'http://localhost');
+      const page = await client.request('thread/list', { limit: 100, sortKey: 'updated_at',
+        sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'unknown'],
+        ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor') } : {}),
+        ...(url.searchParams.get('q') ? { searchTerm: url.searchParams.get('q') } : {}) });
+      const sessions = page.data.map(t => ({ id: t.id, title: sessionTitle(t), path: t.path, cwd: t.cwd,
+        preview: t.preview, model: t.model, mtimeMs: t.updatedAt * 1000 }));
+      setCORS(res); res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ sessions, current: LAST_RESUME_PATH, currentId: threadId, nextCursor: page.nextCursor }));
+    } catch (error) { return rpcError(res, error); }
   }
 
-  if (req.method === 'GET' && req.url === '/session-messages') {
-    const messages = parseSessionMessages(LAST_RESUME_PATH);
-    setCORS(res);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ messages }));
+  if (req.method === 'GET' && (req.url === '/session-messages' || req.url.startsWith('/session-messages?'))) {
+    try {
+      if (!requireAuth(req)) { res.writeHead(401); return res.end(); }
+      const messages = await readTranscript(new URL(req.url, 'http://localhost').searchParams.get('threadId'));
+      setCORS(res); res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ messages }));
+    } catch (error) { rpcError(res, error); }
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/resume') {
     if (!requireAuth(req)) { setCORS(res); res.writeHead(401); return res.end(); }
     let body = '';
     req.on('data', c => body += c);
-    req.on('end', () => {
+    req.on('end', async () => {
       let resumePath = null;
+      let requestedId = null;
       try {
         // Try JSON body first
         const parsed = JSON.parse(body || '{}');
         resumePath = parsed && (parsed.path || parsed.resume_path) || null;
+        requestedId = parsed.thread_id || null;
       } catch {
         // Fallback: raw string body treated as path
         const s = String(body || '').trim();
@@ -749,12 +747,17 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ ok:false, error:'Invalid resume path' }));
         }
       }
-      startCodexWithResume(resumePath || null, () => {
+      try {
+        if (requestedId) {
+          await client.start();
+          const session = await client.request('thread/read', { threadId: requestedId });
+          resumePath = session.thread.path;
+        }
+        await startCodexWithResume(resumePath ? path.resolve(resumePath) : null, requestedId);
         broadcastStatus();
-        setCORS(res);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, resume_path: resumePath || null }));
-      });
+        setCORS(res); res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, resume_path: LAST_RESUME_PATH, thread_id: threadId }));
+      } catch (error) { rpcError(res, error); }
     });
     return;
   }
@@ -775,10 +778,10 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && req.url === '/shutdown') {
     if (!requireAuth(req)) { setCORS(res); res.writeHead(401); return res.end(); }
-    if (codexProc && codexProc.stdin) {
-      try { codexProc.stdin.write(JSON.stringify({ id: 'shutdown', op: { type: 'shutdown' } }) + '\n'); } catch {}
-      try { codexProc.stdin.end(); } catch {}
-    }
+    try {
+      if (activeTurnId) await client.request('turn/interrupt', { threadId, turnId: activeTurnId });
+      await stopCodex();
+    } catch (error) { return rpcError(res, error); }
     setCORS(res);
     res.writeHead(200); res.end('OK');
     return;
@@ -788,6 +791,19 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
+const terminals = new TerminalServer(server, { command: CODEX_CMD, cwd: WORKDIR });
+
+async function readJSON(req) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > 64 * 1024) throw Object.assign(new Error('Request too large'), { status: 413 });
+  }
+  try { return JSON.parse(body || '{}'); }
+  catch { throw Object.assign(new Error('Invalid JSON'), { status: 400 }); }
+}
+
 server.listen(PORT, HOST, () => {
-  console.log(`Codex WebUI running at http://${HOST}:${PORT}`);
+  console.log(`Codex WebUI running at http://${HOST}:${server.address().port}`);
 });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { terminals.dispose(); await stopCodex(); process.exit(0); });

@@ -1,6 +1,9 @@
 // Minimal tests for Codex WebUI using Node's built-in test runner
 // Run with: node --test codex-webui/tests/*.test.js
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
 import test from 'node:test';
@@ -10,8 +13,11 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url)); // codex-webui/
 
 function startServer(port = 5065) {
-  const env = { ...process.env, PORT: String(port) };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webui-basic-'));
+  const env = { ...process.env, PORT: String(port), CODEX_CMD: path.join(root, 'tests/fake-codex.mjs'), WEBUI_CONFIG_FILE: path.join(dir, 'config.toml'), WEBUI_HISTORY_FILE: path.join(dir, 'history.json'), CODEX_HOME: dir, CODEX_WORKDIR: dir };
+
   const child = spawn('node', ['server.js'], { cwd: root, env });
+  child.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
   let out = '';
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (d) => { out += d.toString(); });
@@ -48,7 +54,7 @@ test('GET /config returns defaults', async (t) => {
   const r = await fetch(url + '/config');
   assert.equal(r.status, 200);
   const j = await r.json();
-  assert.ok(j.model, 'model present');
+  assert.equal(j.model, '', 'uses the installed Codex default model');
   assert.ok('approval_policy' in j, 'approval_policy present');
 });
 
@@ -75,4 +81,3 @@ test('GET /sessions returns JSON structure', async (t) => {
   assert.ok(Array.isArray(j.sessions));
   assert.ok('current' in j);
 });
-

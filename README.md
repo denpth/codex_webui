@@ -1,11 +1,15 @@
 # Codex WebUI
 
+## Attribution
+
+This project is based on [Codex-webui by HarryNeoPotter](https://github.com/harryneopotter/Codex-webui). The original code is copyright © 2025 HarryNeoPotter and is distributed under the [MIT license](LICENSE). This repository preserves the original license and Git history, with local workspace, terminal, and Codex compatibility improvements maintained by [denpth](https://github.com/denpth).
+
 > **Website:** [https://codex-webui.hnpart.xyz/](https://codex-webui.hnpart.xyz/)
 
 > **Looking for the TypeScript version?**  
 > See [`Codex-webui-ts`](https://github.com/harryneopotter/Codex-webui/tree/Codex-webui-ts) for the modern, modular TypeScript implementation.
 
-A tiny, dependency-free Web UI that wraps your local **OpenAI Codex CLI**. It streams output via **SSE** like a smooth conversation, auto-resumes from your latest `rollout-*.jsonl` file, and lets you wrangle sessions and memory—all without the terminal turning into a chaotic scribble fest.
+A responsive Web UI that wraps your local **OpenAI Codex CLI**. It streams output via **SSE** like a smooth conversation, auto-resumes from your latest `rollout-*.jsonl` file, and lets you wrangle sessions and memory—all without the terminal turning into a chaotic scribble fest.
 
 > Not affiliated with OpenAI. Runs entirely on your machine—no clouds, no drama.
 
@@ -37,16 +41,32 @@ We've all been there: Codex CLI is brilliant, but terminals? Not so much. Overwr
 - Node.js 18+ (because we're not living in the stone age).
 - OpenAI Codex CLI installed and ready to roll.
 
+### Current Codex CLI compatibility
+
+This checkout uses the [Codex app-server API](https://learn.chatgpt.com/docs/app-server),
+and has been verified with Codex CLI 0.159.0. The old `codex proto` command is no longer used.
+It supports streamed replies, follow-up turns, session resume, paginated transcripts,
+and command/file/permission approval prompts. Sign in with `codex login` if needed.
+
+Leave Model blank in Settings to use your installed Codex configuration's model.
+Use **Save & Restart** to apply settings to an existing conversation. The default
+sandbox is `workspace-write`, with approvals requested when needed. Unsupported
+server requests produce an explicit error instead of hanging or being approved.
+
+For this local installation, start with `sh start-local.sh` and open
+`http://127.0.0.1:5055`. This launcher loads `.env` and requires Node.js 20.6+.
+`npm start` and `node server.js` use exported environment variables instead.
+
 ### Setup
 1. **Clone the repo:**
    ```bash
-   git clone https://github.com/harryneopotter/Codex-webui.git
-   cd Codex-webui
+   git clone https://github.com/denpth/codex_webui.git
+   cd codex_webui
    ```
 
-2. **Install dev dependencies (optional—this baby's dependency-free):**
+2. **Install dependencies:**
    ```bash
-   npm install  # Just for scripts and linting fun
+   npm install
    ```
 
 3. **Set up your env (optional but recommended):**
@@ -56,6 +76,41 @@ We've all been there: Codex CLI is brilliant, but terminals? Not so much. Overwr
    ```
 
 ## Quick Start
+
+### Terminal workspace and phones
+
+The default **Terminal** view runs the native Codex CLI in a real PTY. The
+conversation sidebar uses Codex's saved titles, with prompt context as a fallback.
+On a phone, open the sidebar with **☰**. The screen adapts to the keyboard and
+includes touch buttons for Escape, arrows, Enter, Tab, and Ctrl+C. You can type
+directly into the terminal or use the message field below it.
+
+- **Model** opens Codex's `/model` picker in the active conversation, including
+  after a usage-limit error. Use the arrows and Enter to choose a model/effort;
+  Codex also supports `s` to apply a choice only to this session.
+- **Usage** opens `/usage`. Model changes cannot bypass an account-wide limit.
+- Terminal runs with full filesystem access and approval policy `on-request`.
+  This is access as the user running the server, not root privileges.
+- Reloading or disconnecting a browser leaves terminal processes running. Open
+  them under **Open terminals** to reconnect. Closing a terminal or stopping the
+  WebUI process stops its PTY; saved Codex conversations can still be resumed.
+The browser uses the native terminal for conversations. The legacy chat HTTP API
+remains available, but Codex permits only one active writer per conversation; close
+its native terminal before resuming the same thread through that API.
+
+The local installation is served privately through Tailscale at
+`https://denniss-mac-mini.tail6e8371.ts.net:5055/`. The equivalent mapping is:
+
+```sh
+tailscale serve --bg --https=5055 http://127.0.0.1:5055
+```
+
+Terminal assets are served locally. WebSocket connections use short-lived,
+single-use tickets issued by an authenticated same-origin POST; other websites
+cannot open a terminal WebSocket through the browser. Keep the service on your
+private tailnet. The terminal backend uses `node-pty`, `ws`, and xterm.js; run
+`npm install` before starting it. The postinstall script fixes the executable
+permission on node-pty's packaged Unix spawn helper when necessary.
 
 ### Option 1: npm Magic
 ```bash
@@ -85,6 +140,7 @@ Here's a quick hit list of endpoints to get you hacking:
 - `GET /` — Serves up the static UI.
 - `GET /events` — SSE stream for status, deltas, tools, and stderr.
 - `POST /message` — Send user text (`{ text }`).
+- `POST /approval` — Answer a pending approval (`{ id, decision: "accept" | "decline" }`) or question (`{ id, answers }`).
 - `GET /sessions` — List all session files.
 - `POST /resume` — Resume from a specific rollout (`{ path }`).
 - `GET /session-messages` — Grab the last 100 messages from the current session.
