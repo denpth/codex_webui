@@ -91,6 +91,10 @@ directly into the terminal or use the message field below it.
 - **Usage** opens `/usage`. Model changes cannot bypass an account-wide limit.
 - Terminal runs with full filesystem access and approval policy `on-request`.
   This is access as the user running the server, not root privileges.
+- Opening the same live conversation on multiple devices shares one Codex process.
+  Its grid uses the largest column and row counts requested by connected viewers,
+  so a phone cannot shrink an attached desktop. Swipe horizontally to pan a wider
+  terminal on a narrow screen. After the desktop disconnects, it fits the phone.
 - Reloading or disconnecting a browser leaves terminal processes running. Open
   them under **Open terminals** to reconnect. Closing a terminal or stopping the
   WebUI process stops its PTY; saved Codex conversations can still be resumed.

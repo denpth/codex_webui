@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 const state = { sessions: [], terminals: [], cursor: null, selected: null, activeTerminal: null,
   terminalSessionId: null, socket: null, generation: 0, terminalReady: false, sessionRequest: 0 };
 let term, fit, reconnectTimer, searchTimer;
+let viewportSize = { cols: 80, rows: 24 };
 let waitingForOtherApp = false, terminalUpdatedAt = 0;
 
 async function api(url, { method = 'GET', body } = {}) {
@@ -140,7 +141,7 @@ function initTerminal() {
   term.onTitleChange(title => {
     if (!state.selected && !state.terminalSessionId && title && !/^codex$/i.test(title)) setTerminalTitle(title.split(' | ')[0]);
   });
-  term.onResize(({ cols, rows }) => socketSend({ type: 'resize', cols, rows }));
+
   new ResizeObserver(fitTerminal).observe($('terminalMount'));
 }
 function setTerminalTitle(value) {
@@ -156,8 +157,29 @@ function fitTerminal() {
     const selectedSize = localStorage.getItem('terminalTextSize');
     const size = ['12', '14', '16'].includes(selectedSize) ? Number(selectedSize) : matchMedia('(max-width:640px)').matches ? 12 : 14;
     if (term.options.fontSize !== size) term.options.fontSize = size;
-    fit.fit();
+    const dimensions = fit.proposeDimensions();
+    if (dimensions) {
+      const mount = $('terminalMount');
+      const screen = term.element.querySelector('.xterm-screen');
+      const cellWidth = screen.getBoundingClientRect().width / term.cols;
+      const cellHeight = screen.getBoundingClientRect().height / term.rows;
+      // FitAddon does not subtract the outer scrolling container's gutters.
+      dimensions.cols = Math.max(20, dimensions.cols - Math.ceil((mount.offsetWidth - mount.clientWidth) / cellWidth));
+      dimensions.rows = Math.max(5, dimensions.rows - Math.ceil((mount.offsetHeight - mount.clientHeight) / cellHeight));
+      viewportSize = dimensions;
+      socketSend({ type: 'resize', ...viewportSize });
+    }
+    layoutTerminal();
   } catch {}
+}
+function layoutTerminal() {
+  const screen = term?.element?.querySelector('.xterm-screen');
+  if (!screen) return;
+  // Keep the shared grid intact; narrow viewers pan instead of clipping cells.
+  const scrollbar = term.element.querySelector('.scrollbar.vertical');
+  const gutter = scrollbar?.getBoundingClientRect().width || 14;
+  term.element.style.width = `${Math.ceil(screen.getBoundingClientRect().width + gutter)}px`;
+  term.element.style.height = `${Math.ceil(screen.getBoundingClientRect().height)}px`;
 }
 function socketSend(payload) {
   if (state.socket?.readyState === WebSocket.OPEN) { state.socket.send(JSON.stringify(payload)); return true; }
@@ -199,7 +221,7 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
   $('reconnectButton').hidden = true;
   initTerminal(); fitTerminal();
   let opened;
-  try { opened = await post('/terminal/connect', { clientVersion: 'stable-terminal-3', terminalId, sessionId: session?.id, cols: term.cols, rows: term.rows }); }
+  try { opened = await post('/terminal/connect', { clientVersion: 'shared-terminal-4', terminalId, sessionId: session?.id, cols: viewportSize.cols, rows: viewportSize.rows }); }
   catch (error) {
     if (generation === state.generation) {
       terminalStatus('Unable to connect');
@@ -216,10 +238,14 @@ async function connectTerminal({ session, terminalId, title, reconnect = false }
   term.reset();
   const url = new URL('/terminal/ws', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('ticket', opened.ticket);
   const socket = new WebSocket(url); state.socket = socket;
-  socket.onopen = () => { if (generation === state.generation) { socketSend({ type: 'resize', cols: term.cols, rows: term.rows }); } };
+  socket.onopen = () => { if (generation === state.generation) { socketSend({ type: 'resize', cols: viewportSize.cols, rows: viewportSize.rows }); } };
   socket.onmessage = event => {
     if (generation !== state.generation) return;
     const message = JSON.parse(event.data);
+    if ((message.type === 'ready' || message.type === 'size') && message.cols && message.rows) {
+      // Resize in output order so queued replay is parsed at its original size.
+      term.write('', () => { term.resize(message.cols, message.rows); layoutTerminal(); });
+    }
     if (message.type === 'output') term.write(message.data, updateWaitingTerminal);
     if (message.type === 'ready') { terminalStatus(message.exited ? 'Process ended' : 'Connected', !message.exited); if (message.exited) $('reconnectButton').hidden = false; }
     if (message.type === 'exit') { terminalStatus(`Process ended (${message.exitCode})`); term.writeln('\r\n[Terminal ended. Select a saved conversation or start a new one.]'); loadSessions(); loadTerminals(); }

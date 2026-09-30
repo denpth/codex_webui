@@ -58,3 +58,40 @@ test('PTY input, resize, reconnect replay, one-use tickets and cleanup', async t
   assert.ok(replay.some(m => m.data === 'Existing output\r\n'));
   terminals.close(opened.id); assert.equal(killed, true); assert.equal(terminals.list().length, 0);
 });
+
+test('phone attach and resize cannot shrink an attached desktop terminal', async t => {
+  const server = http.createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const sizes = []; let spawns = 0;
+  const terminals = new TerminalServer(server, { command: 'codex', cwd: '/tmp', spawn: () => {
+    spawns++;
+    return { onData() {}, onExit() {}, write() {}, resize: (...size) => sizes.push(size), kill() {} };
+  } });
+  const sockets = [];
+  t.after(async () => { sockets.forEach(ws => ws.terminate()); terminals.dispose(); server.close(); await once(server, 'close'); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  async function connect(options) {
+    const opened = terminals.open(options);
+    const ws = new WebSocket(origin.replace('http:', 'ws:') + '/terminal/ws?ticket=' + opened.ticket, { origin });
+    const messages = []; ws.on('message', raw => messages.push(JSON.parse(raw))); sockets.push(ws);
+    await once(ws, 'open');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    return { ws, messages, id: opened.id };
+  }
+  const desktop = await connect({ sessionId: 'shared-thread', cols: 160, rows: 40 });
+  const phone = await connect({ sessionId: 'shared-thread', cols: 40, rows: 25 });
+  assert.equal(phone.id, desktop.id); assert.equal(spawns, 1);
+  assert.deepEqual(sizes, [], 'attaching a phone preserves desktop geometry');
+  assert.ok(phone.messages.some(m => m.type === 'ready' && m.cols === 160 && m.rows === 40));
+  phone.ws.send(JSON.stringify({ type: 'resize', cols: 35, rows: 20 }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sizes, [], 'phone rotation does not shrink desktop');
+  desktop.ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 35 }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sizes, [[120, 35]], 'desktop can still resize its own view');
+  assert.ok(phone.messages.some(m => m.type === 'size' && m.cols === 120 && m.rows === 35));
+  desktop.ws.close(); await once(desktop.ws, 'close');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sizes, [[120, 35], [35, 20]], 'phone fits once desktop detaches');
+  const other = terminals.open({ sessionId: 'other-thread', cols: 60, rows: 30 });
+  assert.notEqual(other.id, phone.id); assert.equal(spawns, 2);
+});

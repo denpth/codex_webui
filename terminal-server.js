@@ -26,7 +26,7 @@ export class TerminalServer {
       this.tickets.delete(url.searchParams.get('ticket'));
       const terminal = this.terminals.get(ticket.id);
       if (!terminal) { socket.end('HTTP/1.1 404 Not Found\r\n\r\n'); return; }
-      this.wss.handleUpgrade(req, socket, head, ws => this.attach(ws, terminal));
+      this.wss.handleUpgrade(req, socket, head, ws => this.attach(ws, terminal, ticket));
     });
     this.cleanup = setInterval(() => {
       for (const [key, ticket] of this.tickets) if (ticket.expires < Date.now()) this.tickets.delete(key);
@@ -63,7 +63,7 @@ export class TerminalServer {
         cwd: cwd || this.cwd, env: { ...this.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' }
       });
       terminal = { id: randomUUID(), sessionId: sessionId || null, title: title || 'New conversation', cwd: cwd || this.cwd,
-        proc, clients: new Set(), buffer: '', exited: false, createdAt: Date.now(), inputLine: '' };
+        proc, cols: clamp(cols, 20, 400), rows: clamp(rows, 5, 200), clients: new Set(), buffer: '', exited: false, createdAt: Date.now(), inputLine: '' };
       this.terminals.set(terminal.id, terminal);
       proc.onData(data => {
         terminal.buffer = (terminal.buffer + data).slice(-2 * 1024 * 1024);
@@ -78,17 +78,29 @@ export class TerminalServer {
       });
     }
     const ticket = randomBytes(32).toString('hex');
-    this.tickets.set(ticket, { id: terminal.id, expires: Date.now() + 30000 });
+    this.tickets.set(ticket, { id: terminal.id, cols: clamp(cols, 20, 400), rows: clamp(rows, 5, 200), expires: Date.now() + 30000 });
     return { id: terminal.id, ticket, exited: terminal.exited, title: terminal.title, sessionId: terminal.sessionId };
   }
 
   send(ws, payload) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload)); }
 
-  attach(ws, terminal) {
+  resize(terminal) {
+    if (terminal.exited || !terminal.clients.size) return;
+    const cols = Math.max(...[...terminal.clients].map(ws => ws.cols));
+    const rows = Math.max(...[...terminal.clients].map(ws => ws.rows));
+    if (cols === terminal.cols && rows === terminal.rows) return;
+    terminal.cols = cols; terminal.rows = rows;
+    // Send geometry before the PTY emits output for its new size.
+    for (const client of terminal.clients) this.send(client, { type: 'size', cols, rows });
+    terminal.proc.resize(cols, rows);
+  }
+
+  attach(ws, terminal, ticket) {
+    ws.cols = ticket.cols; ws.rows = ticket.rows;
     terminal.clients.add(ws);
     ws.alive = true;
     ws.on('pong', () => { ws.alive = true; });
-    this.send(ws, { type: 'ready', id: terminal.id, title: terminal.title, exited: terminal.exited });
+    this.send(ws, { type: 'ready', id: terminal.id, title: terminal.title, exited: terminal.exited, cols: terminal.cols, rows: terminal.rows });
     if (terminal.buffer) this.send(ws, { type: 'output', data: terminal.buffer });
     ws.on('message', raw => {
       try {
@@ -100,11 +112,15 @@ export class TerminalServer {
         if (message.type === 'title' && !terminal.sessionId && typeof message.title === 'string') {
           terminal.title = message.title.replace(/\s+/g, ' ').trim().slice(0, 100) || terminal.title;
         }
-        if (message.type === 'resize') terminal.proc.resize(clamp(message.cols, 20, 400), clamp(message.rows, 5, 200));
+        if (message.type === 'resize') {
+          ws.cols = clamp(message.cols, 20, 400); ws.rows = clamp(message.rows, 5, 200);
+          this.resize(terminal);
+        }
       } catch (error) { this.send(ws, { type: 'error', text: error.message }); }
     });
-    ws.on('close', () => terminal.clients.delete(ws));
-    ws.on('error', () => terminal.clients.delete(ws));
+    ws.on('close', () => { terminal.clients.delete(ws); this.resize(terminal); });
+    ws.on('error', () => ws.terminate());
+    this.resize(terminal);
   }
 
   close(id) {

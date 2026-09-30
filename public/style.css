@@ -4,3 +4,5 @@
 
 
 .terminal-status{height:44px;min-height:44px;flex-shrink:0;white-space:nowrap}.terminal-status #terminalStatusText{min-width:0;overflow:hidden;text-overflow:ellipsis}.terminal-status #refreshTerminal{width:82px;flex-shrink:0;font-size:10px;min-height:30px;padding:5px}.terminal-status .terminal-access{overflow:hidden;text-overflow:ellipsis}
+
+#terminalMount{overflow:auto;overscroll-behavior:contain}#terminalHost .xterm{min-height:100%}
