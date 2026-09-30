@@ -54,6 +54,11 @@ export class TmuxSessions {
 
   open({ terminalId, sessionId, title, cwd, model, cols = 100, rows = 30 } = {}) {
     const sessions = this.list();
+    if (sessions.length) {
+      // Setting even an unchanged option repaints every tmux client.
+      const filler = this.run(['show-options', '-gqv', 'fill-character']);
+      if (filler) this.run(['set-option', '-gq', 'fill-character', ' ']);
+    }
     if (terminalId) {
       const session = sessions.find(s => s.id === terminalId);
       if (!session) throw Object.assign(new Error('This terminal has ended. Open the conversation again.'), { status: 404 });
@@ -65,6 +70,7 @@ export class TmuxSessions {
     fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(this.configFile, [
       'set -g status off', 'set -g history-limit 10000', 'set -g mouse on',
+      "set -gq fill-character ' '",
       'set -g window-size manual', 'set -g remain-on-exit on',
       'set -g destroy-unattached off', 'set -g allow-rename off',
       'set -g set-titles on', 'set -g set-titles-string "#{pane_title}"'
