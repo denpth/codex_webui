@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101214">
+  <title>Codex · Workspace</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/vendor/xterm.js"></script>
+  <script defer src="/vendor/addon-fit.js"></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <button class="scrim" id="scrim" aria-label="Close sessions" hidden></button>
+    <aside id="sidebar" aria-label="Conversations">
+      <div class="brand"><span class="brand-icon">›_</span><strong>Codex</strong><span class="subtle">workspace</span><button id="closeSidebar" class="icon mobile-only" aria-label="Close sessions">×</button></div>
+      <button id="newSession" class="new-session"><span>＋</span> New conversation <span class="shortcut">⌘ K</span></button>
+      <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off"></label>
+      <div class="session-scroll">
+        <section id="liveSection" hidden><h2>Open terminals</h2><div id="liveSessions"></div></section>
+        <section><div class="section-heading"><h2>Conversations</h2><button id="refreshSessions" class="icon" aria-label="Refresh conversations">↻</button></div><div id="sessions"><p class="empty-list">Loading conversations…</p></div><button id="loadMore" class="quiet" hidden>Load older conversations</button></section>
+      </div>
+      <div class="side-footer"><span><i id="connectionDot" class="dot"></i><span id="connectionText">Connecting</span></span><button id="settingsButton" class="quiet">Settings</button></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <button id="openSidebar" class="icon mobile-only" aria-label="Open sessions" aria-expanded="false">☰</button>
+        <div class="heading"><span class="eyebrow">WORKSPACE</span><h1 id="conversationTitle">New conversation</h1></div>
+        <span class="native-label">Native Codex CLI</span>
+      </header>
+      <div class="toolbar">
+        <div class="toolbar-context"><span id="modeBadge" class="badge">TERMINAL</span><span id="workdir" title="Working directory">Local Codex CLI</span></div>
+        <div class="toolbar-actions"><button id="expandTerminal" aria-pressed="false" title="Use the full workspace for the terminal">Expand</button><button id="fitPane" title="Resize the shared Codex pane to this screen" hidden>Fit terminal</button><button id="modelButton" title="Change the current model">◇ <span>Model</span><span class="chevron">⌄</span></button><button id="usageButton" title="Show usage and limits">Usage</button><button id="stopButton" title="Interrupt current work">■ <span>Stop</span></button><button id="closeTerminal" class="icon" title="Close this terminal" aria-label="Close terminal" hidden>×</button></div>
+      </div>
+      <div id="alert" class="alert" role="alert" hidden><span id="alertText"></span><button id="alertModel">Change model</button><button id="dismissAlert" class="icon" aria-label="Dismiss error">×</button></div>
+      <section id="terminalView" class="workspace-view" aria-label="Codex terminal">
+        <div id="terminalWelcome" class="welcome"><span class="welcome-icon">›_</span><h2>Your workspace, anywhere.</h2><p>Open a conversation on the left, or start a new one.<br>The real Codex terminal, right here.</p><button id="launchTerminal" class="primary">Start Codex <span>↗</span></button><div class="welcome-notes"><span>Full computer access</span><span>Live model switching</span><span>Reconnect without losing work</span></div></div>
+        <div id="terminalHost" hidden><div id="terminalMount"></div><pre id="terminalWrapped" hidden tabindex="0" aria-label="Wrapped terminal output"></pre><div id="terminalScrollbar" class="terminal-scrollbar" hidden role="scrollbar" tabindex="0" aria-label="Terminal scroll position" aria-controls="terminalWrapped" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="terminalScrollThumb"></div></div></div>
+        <div id="terminalStatus" class="terminal-status" hidden><i class="dot"></i><span id="terminalStatusText">Connected</span><span class="terminal-access">Full filesystem access · approvals on request</span><button id="refreshTerminal" class="quiet" title="Refresh this conversation from the other app" aria-label="Refresh terminal history" style="visibility:hidden">↻</button><button id="reconnectButton" class="quiet" hidden>Reconnect</button></div>
+        <div id="terminalDisplay" class="terminal-display-controls" hidden aria-label="Terminal display"><button id="wrapTerminal" aria-pressed="false">Wrap</button><button id="gridTerminal" aria-pressed="true">Grid</button><span id="typingHint">Type directly in the terminal</span></div>
+        <div id="terminalViewport" class="terminal-view-controls" hidden aria-label="Terminal viewport"><span>View</span><button data-pan="left" aria-label="Pan view left">←</button><button data-pan="right" aria-label="Pan view right">→</button><button data-pan="up" aria-label="Pan view up">↑</button><button data-pan="down" aria-label="Pan view down">↓</button><button data-pan="follow">Follow cursor</button></div>
+        <div id="terminalKeys" class="terminal-keys" hidden aria-label="Terminal keys"><button id="shiftKey" aria-pressed="false" title="Modify the next terminal key">Shift ⇧</button><button data-key="escape">Esc</button><button data-key="tab">Tab</button><button data-key="up" aria-label="Up arrow">↑</button><button data-key="down" aria-label="Down arrow">↓</button><button data-key="left" aria-label="Left arrow">←</button><button data-key="right" aria-label="Right arrow">→</button><button data-key="interrupt">Ctrl C</button><button data-key="enter" class="enter-key">Enter ↵</button></div>
+        <form id="terminalComposer" class="composer" hidden><textarea id="terminalInput" rows="1" placeholder="Type or paste a message for Codex…" aria-label="Terminal message" autocapitalize="sentences" spellcheck="false"></textarea><button type="submit" class="primary" aria-label="Send to terminal">Send ↑</button></form>
+      </section>
+    </main>
+  </div>
+  <dialog id="settingsDialog"><form method="dialog" class="dialog-heading"><h2>Terminal preferences</h2><button aria-label="Close settings" class="icon">×</button></form><form id="settingsForm"><label>Text size<select id="textSize"><option value="auto">Automatic for this screen</option><option value="12">Small · 12 px</option><option value="14">Medium · 14 px</option><option value="16">Large · 16 px</option></select></label><label>WebUI access token (if configured)<input id="accessToken" type="password" autocomplete="off" placeholder="Optional"></label><div class="dialog-actions"><button class="primary" type="submit">Save preferences</button></div><p class="dialog-note">This terminal runs as your Mac user with full filesystem access and approvals on request. Use Model to switch models, Usage to check limits, and /permissions to adjust Codex permissions.</p></form></dialog>
+  <dialog id="confirmDialog"><h2>Close this terminal?</h2><p>This stops Codex and closes this terminal on every connected device. Saved conversations remain in the sidebar.</p><div class="dialog-actions"><button id="cancelClose">Keep open</button><button id="confirmClose" class="primary">Close terminal</button></div></dialog>
+</body>
+</html>
